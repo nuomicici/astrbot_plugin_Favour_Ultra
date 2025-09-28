@@ -323,10 +323,10 @@ class FavourManagerTool(Star):
         
         # 校验所有配置参数的合法性（数值范围、类型等）
         self._validate_config()
-        # 初始化数据目录（./data/favour_manager）和文件管理器实例
-        self.data_dir = Path(context.get_config().get("plugin.data_dir", "./data")) / "favour_manager"
+        # 初始化数据目录（./data/hao_gan_du）和文件管理器实例
+        self.data_dir = Path(context.get_config().get("plugin.data_dir", "./data")) / "hao_gan_du"
         self.file_manager = FavourFileManager(self.data_dir, self.enable_clear_backup)
-        self.global_favour_manager = GlobalFavourFileManager(self.data_dir)
+        self.global_hao_gan_du = GlobalFavourFileManager(self.data_dir)
         # 正则表达式：匹配LLM输出中的好感度标签（如[好感度 上升：1]）
         self.favour_pattern = re.compile(r'[\[［]\s*好感度.*?[\]］]', re.DOTALL | re.IGNORECASE)
         # 正则表达式：匹配LLM输出中的关系确认标签（如[用户申请确认关系朋友:true]）
@@ -414,7 +414,7 @@ class FavourManagerTool(Star):
 
         # 非全局模式下，优先从全局好感度导入初始值
         if not self.is_global_favour:
-            global_favour = await self.global_favour_manager.get_user_global_favour(user_id)
+            global_favour = await self.global_hao_gan_du.get_user_global_favour(user_id)
             if global_favour is not None:
                 logger.info(f"从全局好感度导入用户[{user_id}]（会话[{session_id}]）的初始值：{global_favour}")
                 return global_favour
@@ -840,7 +840,7 @@ class FavourManagerTool(Star):
 💡 注意事项
 - 好感度变化标签若存在多个，仅最后一个生效
 - 全局模式下所有会话共用好感度数据，非全局模式按会话隔离
-- 数据文件存储路径：./data/favour_manager/
+- 数据文件存储路径：./data/hao_gan_du/
 - 支持多平台用户ID格式（QQ、Telegram、企微、飞书等）
 
 💫 更多帮助请前往https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/ 查看~
