@@ -144,7 +144,7 @@ class FavourFileManager:
                 logger.error(f"haogan.json格式无效（路径：{self.data_path}），需为list类型，返回空列表")  
                 return []
             
-            logger.info(f"读取haogan.json成功（路径：{self.data_path}），共{len(valid_data)}条记录")
+            logger.info(f"读取haogan.json成功（路径：{self.data_path}），一共{len(valid_data)}条记录")
             return valid_data
         
         except Exception as e:
@@ -225,16 +225,11 @@ class FavourFileManager:
             # 遍历查找已有记录，存在则更新
             for item in data:
                 if item["userid"] == userid_str and item["session_id"] == session_id:
-                    old_favour = item["favour"]
-                    old_relation = item["relationship"]
                     # 仅在参数非None时更新对应字段
                     if favour is not None:
                         item["favour"] = max(-100, min(100, favour))
                     if relationship is not None:
                         item["relationship"] = relationship
-                    
-                    logger.debug(f"更新用户[{userid_str}]（会话[{session_id}]）记录："
-                                f"好感度[{old_favour}→{item['favour']}]，关系[{old_relation}→{item['relationship']}]")
                     found = True
                     break
             
@@ -248,7 +243,6 @@ class FavourFileManager:
                     "favour": init_favour,
                     "relationship": init_relation
                 })
-                logger.debug(f"新增用户[{userid_str}]（会话[{session_id}]）记录：好感度[{init_favour}]，关系[{init_relation}]")
             
             return await self.write_favour(data)  
 
@@ -482,7 +476,6 @@ class FavourManagerTool(Star):
 **请务必！务必参考好感度值进行判断！绝对不要为了迎合用户而潦草确认！！！**
 # 以下是详细角色设定（若为空则按照一个普通的人类进行对话）
 
-
 """
 
         # 填充模板参数，生成最终prompt，并注入到LLM的system prompt头部
@@ -514,132 +507,122 @@ class FavourManagerTool(Star):
             additional_text = None  # 附加文本（如关系解除提示）
             change_n = 0            # 最终好感度变化值（正数上升，负数降低）
 
-            # 1. 提取好感度变化标签：匹配所有[好感度...]标签，仅取最后一个有效值
+            # 1. 提取好感度变化标签
             favour_matches = self.favour_pattern.findall(original_text)
             if favour_matches:
                 logger.debug(f"匹配到{len(favour_matches)}个好感度变化标签：{favour_matches}（仅取最后一个值）")
                 for idx, match in enumerate(favour_matches):
                     match_str = match.lower().strip()
-                    temp_change = 0  # 临时变化值，用于中间计算
-                    
-                    # 匹配“降低”标签，提取数值并限制在配置范围内
+                    temp_change = 0
                     if "降低" in match_str:
                         n_match = re.search(r'降低\s*[:：]?\s*(\d+)', match_str)
                         if n_match:
                             try:
                                 n = int(n_match.group(1).strip())
-                                # 取配置范围内的数值，转为负数（降低）
                                 temp_change = -max(self.favour_decrease_min, min(self.favour_decrease_max, n))
-                            except (ValueError, TypeError):
-                                temp_change = 0
-                    
-                    # 匹配“上升”标签，提取数值并限制在配置范围内
+                            except (ValueError, TypeError): pass
                     elif "上升" in match_str:
                         n_match = re.search(r'上升\s*[:：]?\s*(-?\d+)', match_str)
                         if n_match:
                             try:
-                                n = abs(int(n_match.group(1).strip()))  # 确保为正数
+                                n = abs(int(n_match.group(1).strip()))
                                 temp_change = max(self.favour_increase_min, min(self.favour_increase_max, n))
-                            except (ValueError, TypeError):
-                                temp_change = 0
-                    
-                    # 匹配“持平”标签，变化值为0
+                            except (ValueError, TypeError): pass
                     elif "持平" in match_str:
                         temp_change = 0
                     
-                    # 仅保留最后一个标签的变化值
                     if idx == len(favour_matches) - 1:
                         change_n = temp_change
                         logger.debug(f"最后一个有效变化值：{change_n}（标签：{match}）")
 
-            # 2. 提取关系确认标签：匹配[用户申请确认关系...]，仅取最后一个
-            relationship = None
+            # 2. 提取关系确认标签
+            relationship_update = None
             rel_matches = self.relationship_pattern.findall(original_text)
             if rel_matches:
                 rel_name, rel_bool = rel_matches[-1]
-                # 仅当同意（true）且关系名称非空时，更新关系
                 if rel_bool.lower() == "true" and rel_name.strip():
-                    relationship = rel_name.strip()
-                    logger.info(f"检测到关系确认：{relationship}，将更新到用户[{user_id}]（会话[{session_id}]）的记录")
+                    relationship_update = rel_name.strip()
 
-            # 3. 更新用户好感度数据：存在记录则更新，无记录则新增
+            # 3. 更新用户好感度数据
             current_record = await self.file_manager.get_user_favour(user_id, session_id)
             
             if current_record:
                 old_favour = current_record["favour"]
-                # 计算新好感度（仅当变化值非0时更新）
-                new_favour = old_favour + change_n if change_n != 0 else old_favour
-                new_favour = max(-100, min(100, new_favour))  # 限制范围
-                old_relationship = current_record.get("relationship", "").strip()
+                new_favour = max(-100, min(100, old_favour + change_n))
+                old_relationship = current_record.get("relationship", "") or ""
                 
-                # 处理关系：若好感度变为负值，强制解除关系并添加提示文本
-                final_relationship = relationship  
+                final_relationship = old_relationship
+                
+                # 情况A: LLM确认了新关系
+                if relationship_update is not None:
+                    final_relationship = relationship_update
+                
+                # 情况B: 好感度变为负值，强制解除关系 (优先级更高)
                 if new_favour < 0 and old_relationship:
                     final_relationship = ""
                     additional_text = f"还有，我不想和你做{old_relationship}了。"
-                    logger.info(f"用户[{user_id}]好感度变为负值（{new_favour}），将解除关系：{old_relationship}")
 
-                # 调用文件管理器更新数据
-                await self.file_manager.update_user_favour(
-                    userid=user_id,
-                    session_id=session_id,
-                    favour=new_favour if change_n != 0 else None,  # 变化值为0时不更新好感度字段
-                    relationship=final_relationship
-                )
-                
-                # 记录更新日志
-                if change_n != 0:
-                    logger.info(f"用户[{user_id}]（会话[{session_id}]）好感度变化：{old_favour} → {new_favour}（变化值：{change_n}），关系变化：{old_relationship} → {final_relationship}")
+                # --- 【核心修改】检查是否有任何数据发生变更 ---
+                favour_changed = (new_favour != old_favour)
+                relationship_changed = (final_relationship != old_relationship)
 
+                if favour_changed or relationship_changed:
+                    # --- 【日志1: 修改内容日志】使用 logger.info 输出详细的变更信息 ---
+                    logger.info(
+                        f"用户[{user_id}]数据更新 (会话: {session_id}):\n"
+                        f"  ├─ 好感度: {old_favour} → {new_favour} (变化: {change_n})\n"
+                        f"  └─ 关系: '{old_relationship}' → '{final_relationship}'"
+                    )
+                    await self.file_manager.update_user_favour(
+                        userid=user_id,
+                        session_id=session_id,
+                        favour=new_favour if favour_changed else None,
+                        relationship=final_relationship if relationship_changed else None
+                    )
             else:
-                # 新用户：获取初始好感度，处理关系（负值解除）
+                # 新用户逻辑
                 initial_favour = await self._get_initial_favour(event)
-                initial_relationship = (relationship or "").strip()
-                final_relationship = initial_relationship
+                final_relationship = relationship_update or ""
                 
-                if initial_favour < 0 and initial_relationship:
+                if initial_favour < 0 and final_relationship:
+                    additional_text = f"还有，我不想和你做{final_relationship}了。"
                     final_relationship = ""
-                    additional_text = f"还有，我不想和你做{initial_relationship}了。"
-                    logger.info(f"新用户[{user_id}]初始好感度为负值（{initial_favour}），将解除关系：{initial_relationship}")
 
-                # 新增用户记录
+                logger.info(f"新用户[{user_id}]注册 (会话: {session_id}), 初始好感度: {initial_favour}, 初始关系: '{final_relationship}'")
                 await self.file_manager.update_user_favour(
                     userid=user_id,
                     session_id=session_id,
                     favour=initial_favour,
                     relationship=final_relationship
                 )
-                logger.info(f"新用户[{user_id}]（会话[{session_id}]）注册，初始好感度：{initial_favour}，关系：{final_relationship}")
 
-            # 4. 清理LLM输出文本：移除好感度和关系标签，添加附加文本（如关系解除提示）
+            # 4. 清理LLM输出文本并记录删除的标签
+            all_deleted_tags = []
+            if favour_matches:
+                all_deleted_tags.extend(favour_matches)
             
-            # --- 新增日志记录开始 ---
-            # 查找所有要被删除的完整关系标签字符串
-            full_relationship_tags = self.relationship_pattern.finditer(original_text)
-            all_deleted_tags = favour_matches + [match.group(0) for match in full_relationship_tags]
+            full_relationship_tags_iter = self.relationship_pattern.finditer(original_text)
+            all_deleted_tags.extend([match.group(0) for match in full_relationship_tags_iter])
 
             if all_deleted_tags:
-                # 将所有找到的标签连接成一个字符串用于记录
+                # --- 【日志2: 删除内容日志】使用 logger.info 输出被删除的标签 ---
                 deleted_content_str = ", ".join(all_deleted_tags)
                 logger.info(f"从LLM回复中删除了标签: {deleted_content_str}")
-            # --- 新增日志记录结束 ---
             
             cleaned_text = self.favour_pattern.sub("", original_text)
             cleaned_text = self.relationship_pattern.sub("", cleaned_text).strip()
             if additional_text:
                 cleaned_text = f"{cleaned_text}\n{additional_text}" if cleaned_text else additional_text
             
-            # 更新响应文本，确保用户看不到标签
             resp.completion_text = cleaned_text
             logger.debug(f"清理后文本长度：{len(cleaned_text)}")
 
-            # 5. 同步清理事件结果中的文本（若存在chain结构）
+            # 5. 同步清理事件结果中的文本
             result = event.get_result()
             if result and hasattr(result, "chain"):
                 new_chain = []
                 for comp in result.chain:
                     if isinstance(comp, Plain):
-                        # 清理Plain组件中的标签
                         cleaned_comp_text = self.favour_pattern.sub("", comp.text)
                         cleaned_comp_text = self.relationship_pattern.sub("", cleaned_comp_text).strip()
                         if cleaned_comp_text:
@@ -648,12 +631,10 @@ class FavourManagerTool(Star):
                         new_chain.append(comp)
                 result.chain = new_chain
 
-        # 捕获所有异常，避免插件崩溃，记录日志
         except Exception as e:
             logger.error(f"处理LLM响应异常（用户[{user_id}]，会话[{session_id}]）: {str(e)}")
             logger.error(f"异常堆栈: {traceback.format_exc()}")
         
-        # 确保事件继续执行（防止拦截器导致事件终止）
         finally:
             if event.is_stopped():
                 event.continue_event()
@@ -697,12 +678,10 @@ class FavourManagerTool(Star):
         if current_record:
             current_favour = current_record["favour"]
             current_relationship = current_record["relationship"] or "无"
-            logger.info(f"用户[{user_id}]（会话[{session_id}]）查询自身好感度：{current_favour}，关系：{current_relationship}")
         else:
             # 新用户：返回初始好感度
             current_favour = await self._get_initial_favour(event)
             current_relationship = "无"
-            logger.info(f"新用户[{user_id}]（会话[{session_id}]）首次查询好感度，初始值：{current_favour}")
         
         # 生成会话模式提示
         session_hint = "（全局模式）" if self.is_global_favour else f"（会话：{session_id}）"
@@ -875,13 +854,3 @@ class FavourManagerTool(Star):
         except Exception as e:
             logger.error(f"插件卸载时保存数据失败（路径：{self.file_manager.data_path}）: {str(e)}")
             logger.error(f"异常堆栈: {traceback.format_exc()}")
-
-
-## 其他说明
-## 1. 数据备份机制：备份文件仅生成不自动清理，长期使用会占用磁盘空间，需手动删除旧备份。不会添加删除功能，确保数据是被用户主动删除的
-## 2. 正则匹配局限性：好感度标签和关系标签的匹配依赖固定格式（如[好感度 上升：1]），若LLM输出格式不规范（如全角符号、多余空格）可能漏检。但这是为了让检测更加严格，防止其他因素干扰
-## 3. 异常处理粒度：部分场景（如文件读写失败）仅返回默认值或空数据，未给用户明确提示（如管理员执行命令时），后续修复！（画饼ing）
-## 4. 性能风险：当用户量或会话量较大时（如千级以上记录），read_favour方法会读取整个文件解析，可能导致性能瓶颈（无分页读取），后续加
-## 5. 全局模式数据隔离：全局模式和非全局模式的数据分别存储在global_favour.json和haogan.json，但未做数据同步机制（如切换模式后历史数据无法复用）。这是为了让数据互不干扰，防止不同人格的数据相同，导致应用效果极差
-## 6. 特使、关系等无法通过命令修改、添加或删除，是为了不被用户擅自修改（确保只能在WebUI界面修改），哦关系那个只能直接修改文件，而且好像除了好感度降低到0以下，不会解除关系？下次新增判断
-## 7. 关系逻辑单一：仅支持“好感度负值解除关系”，无其他关系管理逻辑（如关系升级、有效期等）后续会添加更多判断，慢慢来！
