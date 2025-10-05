@@ -1,7 +1,7 @@
 import json
 import re
 import traceback
-import string  # 移到文件顶部
+import string
 from pathlib import Path
 from typing import Dict, List, AsyncGenerator, Optional, Tuple, Any  
 import asyncio
@@ -9,7 +9,7 @@ from aiofiles import open as aio_open
 from aiofiles.os import path as aio_path
 from datetime import datetime
 
-from astrbot.api import logger  # 修正导入路径
+from astrbot.api import logger
 from astrbot.core.message.components import Plain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
@@ -29,6 +29,43 @@ def is_valid_userid(userid: str) -> bool:
         return False
     allowed_chars = string.ascii_letters + string.digits + "_-:@."
     return all(c in allowed_chars for c in userid)
+
+
+# ==================== 通用文件管理基类 ====================
+class AsyncJsonFileManager:
+    """异步JSON文件管理基类"""
+    def __init__(self, data_dir: Path, filename: str):
+        self.data_path = data_dir / filename
+        self.data_dir = data_dir
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.lock = asyncio.Lock()
+
+    async def _read_json(self) -> Any:
+        """读取JSON文件"""
+        try:
+            if not await aio_path.exists(self.data_path):
+                logger.debug(f"{self.data_path.name}不存在，返回默认值")
+                return self._get_default_value()
+            
+            async with aio_open(self.data_path, "r", encoding="utf-8") as f:
+                return json.loads(await f.read())
+        except Exception as e:
+            logger.error(f"读取{self.data_path.name}失败: {str(e)}")
+            return self._get_default_value()
+
+    async def _write_json(self, data: Any) -> bool:
+        """写入JSON文件"""
+        try:
+            async with aio_open(self.data_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+            return True
+        except Exception as e:
+            logger.error(f"写入{self.data_path.name}失败: {str(e)}")
+            return False
+
+    def _get_default_value(self) -> Any:
+        """获取默认值，子类需要重写"""
+        raise NotImplementedError
 
 
 # ==================== 权限系统 ====================
@@ -91,7 +128,8 @@ class PermissionManager:
             info = await event.bot.get_group_member_info(
                 group_id=int(group_id), user_id=int(user_id), no_cache=True
             )
-        except Exception:
+        except Exception as e:
+            logger.error(f"获取群成员信息失败: {str(e)}\n{traceback.format_exc()}")
             return PermLevel.UNKNOWN
 
         role = info.get("role", "unknown")
@@ -108,120 +146,104 @@ class PermissionManager:
 
 
 # ==================== 全局好感度文件管理 ====================
-class GlobalFavourFileManager:
+class GlobalFavourFileManager(AsyncJsonFileManager):
     def __init__(self, data_dir: Path):
-        self.data_path = data_dir / "global_favour.json"
-        self.data_dir = data_dir
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.lock = asyncio.Lock()
+        super().__init__(data_dir, "global_favour.json")
+
+    def _get_default_value(self) -> Dict[str, int]:
+        return {}
 
     async def read_global_favour(self) -> Dict[str, int]:
-        try:
-            if not await aio_path.exists(self.data_path):
-                logger.info("global_favour.json不存在，返回空字典")
-                return {}
-            
-            async with aio_open(self.data_path, "r", encoding="utf-8") as f:
-                raw_data = json.loads(await f.read())
-            
-            valid_data = {}
-            for userid, favour in raw_data.items():
-                try:
-                    valid_data[str(userid)] = int(favour)
-                except (ValueError, TypeError):
-                    logger.warning(f"global_favour.json无效数据：用户ID[{userid}]，值[{favour}]（跳过）")
-            
-            return valid_data
-        
-        except Exception as e:
-            logger.error(f"读取全局好感度失败: {str(e)}")
+        """读取全局好感度数据"""
+        raw_data = await self._read_json()
+        if not isinstance(raw_data, dict):
+            logger.error(f"global_favour.json格式无效，需为dict类型")
             return {}
+        
+        valid_data = {}
+        for userid, favour in raw_data.items():
+            try:
+                valid_data[str(userid)] = int(favour)
+            except (ValueError, TypeError):
+                logger.warning(f"global_favour.json无效数据：用户ID[{userid}]，值[{favour}]（跳过）")
+        
+        return valid_data
 
     async def write_global_favour(self, data: Dict[str, int]) -> bool:
-        try:
-            async with aio_open(self.data_path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(data, ensure_ascii=False, indent=2))
-            
-            logger.info(f"写入global_favour.json成功，包含{len(data)}个用户数据")
-            return True
-        
-        except Exception as e:
-            logger.error(f"写入全局好感度失败: {str(e)}")
+        """写入全局好感度数据"""
+        if not isinstance(data, dict):
+            logger.error("写入数据格式无效，需为dict类型")
             return False
+        
+        success = await self._write_json(data)
+        if success:
+            logger.info(f"写入global_favour.json成功，包含{len(data)}个用户数据")
+        return success
 
     async def get_user_global_favour(self, userid: str) -> Optional[int]:
+        """获取用户全局好感度"""
         global_data = await self.read_global_favour()
         return global_data.get(str(userid))
 
     async def update_global_favour(self, userid: str, favour: int) -> bool:
-        if not is_valid_userid(userid):  # 使用共享函数
+        """更新用户全局好感度"""
+        if not is_valid_userid(userid):
             logger.error(f"更新全局好感度失败：用户ID[{userid}]格式无效")
             return False
         
-        async with self.lock:  
-            data = await self.read_global_favour()  
+        async with self.lock:
+            data = await self.read_global_favour()
             userid_str = str(userid)
             data[userid_str] = max(-100, min(100, favour))
-            return await self.write_global_favour(data)  
+            return await self.write_global_favour(data)
 
 
 # ==================== 会话级好感度文件管理 ====================
-class FavourFileManager:
+class FavourFileManager(AsyncJsonFileManager):
     def __init__(self, data_dir: Path, enable_clear_backup: bool):
-        self.data_path = data_dir / "haogan.json"
-        self.data_dir = data_dir
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.lock = asyncio.Lock()
+        super().__init__(data_dir, "haogan.json")
         self.enable_clear_backup = enable_clear_backup
 
-    async def read_favour(self) -> List[Dict[str, Any]]:
-        """读取会话级好感度数据，返回List格式"""
-        try:
-            if not await aio_path.exists(self.data_path):
-                logger.debug("haogan.json不存在，返回空列表")
-                return []
-            
-            async with aio_open(self.data_path, "r", encoding="utf-8") as f:
-                raw_data = json.loads(await f.read())
-            
-            valid_data = []
-            if isinstance(raw_data, list):
-                for item in raw_data:
-                    if not isinstance(item, dict):
-                        logger.warning(f"haogan.json包含非dict元素：{item}（跳过）")
-                        continue
-                    valid_item = {
-                        "userid": str(item.get("userid", "")),
-                        "favour": int(item.get("favour", 0)) if isinstance(item.get("favour"), (int, float)) else 0,
-                        "session_id": str(item.get("session_id")) if item.get("session_id") else None,
-                        "relationship": str(item.get("relationship", ""))
-                    }
-                    valid_data.append(valid_item)
-            else:
-                logger.error(f"haogan.json格式无效，需为list类型，返回空列表")  
-                return []
-            
-            logger.info(f"读取haogan.json成功，一共{len(valid_data)}条记录")
-            return valid_data
-        
-        except Exception as e:
-            logger.error(f"读取好感度数据失败: {str(e)}")  
-            return []
+    def _get_default_value(self) -> List[Dict[str, Any]]:
+        return []
 
-    async def write_favour(self, data: List[Dict[str, Any]]) -> bool:  
-        try:
-            async with aio_open(self.data_path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(data, ensure_ascii=False, indent=2))
-            
-            logger.info(f"修改haogan.json成功，写入{len(data)}条记录")
-            return True
+    async def read_favour(self) -> List[Dict[str, Any]]:
+        """读取会话级好感度数据"""
+        raw_data = await self._read_json()
+        if not isinstance(raw_data, list):
+            logger.error(f"haogan.json格式无效，需为list类型")
+            return []
         
-        except Exception as e:
-            logger.error(f"修改好感度数据失败: {str(e)}")
+        valid_data = []
+        for item in raw_data:
+            if not isinstance(item, dict):
+                logger.warning(f"haogan.json包含非dict元素：{item}（跳过）")
+                continue
+            valid_item = {
+                "userid": str(item.get("userid", "")),
+                "favour": int(item.get("favour", 0)) if isinstance(item.get("favour"), (int, float)) else 0,
+                "session_id": str(item.get("session_id")) if item.get("session_id") else None,
+                "relationship": str(item.get("relationship", ""))
+            }
+            valid_data.append(valid_item)
+        
+        logger.info(f"读取haogan.json成功，一共{len(valid_data)}条记录")
+        return valid_data
+
+    async def write_favour(self, data: List[Dict[str, Any]]) -> bool:
+        """写入会话级好感度数据"""
+        if not isinstance(data, list):
+            logger.error("写入数据格式无效，需为list类型")
             return False
+        
+        success = await self._write_json(data)
+        if success:
+            logger.info(f"修改haogan.json成功，写入{len(data)}条记录")
+        return success
 
     async def clear_all_favour(self) -> bool:
-        logger.warning("触发清空所有好感度数据操作")  
+        """清空所有好感度数据"""
+        logger.warning("触发清空所有好感度数据操作")
         
         if self.enable_clear_backup:
             try:
@@ -237,11 +259,12 @@ class FavourFileManager:
                     logger.info(f"清空前备份完成：{backup_path}（包含{len(backup_data)}条记录）")
             except Exception as e:
                 logger.error(f"备份数据失败，清空操作中止：{str(e)}")
-                return False  
+                return False
         
         return await self.write_favour([])
 
-    async def get_user_favour(self, userid: str, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:  
+    async def get_user_favour(self, userid: str, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """获取用户好感度记录"""
         userid_str = str(userid)
         data = await self.read_favour()
         for item in data:
@@ -253,13 +276,14 @@ class FavourFileManager:
         return None
 
     async def update_user_favour(self, userid: str, session_id: Optional[str], favour: Optional[int] = None, relationship: Optional[str] = None) -> bool:
+        """更新用户好感度"""
         userid_str = userid.strip()
-        if not is_valid_userid(userid_str):  # 使用共享函数
+        if not is_valid_userid(userid_str):
             logger.error(f"更新好感度失败：用户ID[{userid_str}]格式无效")
-            return False        
-            
-        async with self.lock:  
-            data = await self.read_favour()  
+            return False
+        
+        async with self.lock:
+            data = await self.read_favour()
             found = False
             
             for item in data:
@@ -281,13 +305,14 @@ class FavourFileManager:
                     "relationship": init_relation
                 })
             
-            return await self.write_favour(data)  
+            return await self.write_favour(data)
 
     async def delete_user_favour(self, userid: str, session_id: Optional[str] = None) -> Tuple[bool, str]:
+        """删除用户好感度数据"""
         userid_str = userid.strip()
-        if not is_valid_userid(userid_str):  # 使用共享函数
-            return False, f"删除失败：用户ID[{userid_str}]格式无效"        
-            
+        if not is_valid_userid(userid_str):
+            return False, f"删除失败：用户ID[{userid_str}]格式无效"
+        
         async with self.lock:
             data = await self.read_favour()
             new_data = [item for item in data if not (item["userid"] == userid_str and item["session_id"] == session_id)]
@@ -341,7 +366,8 @@ class FavourManagerTool(Star):
         
         self._validate_config()
         
-        self.admins_id = context.get_config().get("admins_id", [])# 按照人机审核结果修改后提示context中没那个方法
+        # 初始化权限管理器
+        self.admins_id = context.get_config().get("admins_id", [])
         self.perm_level_threshold = self.config.get("level_threshold", self.DEFAULT_CONFIG["level_threshold"])
         
         PermissionManager.get_instance(
@@ -354,14 +380,15 @@ class FavourManagerTool(Star):
         self.file_manager = FavourFileManager(self.data_dir, self.enable_clear_backup)
         self.global_hao_gan_du = GlobalFavourFileManager(self.data_dir)
         
-        # 正则表达式
-        self.favour_pattern = re.compile(r'[\[［]\s*好感度.*?[\]］]', re.DOTALL | re.IGNORECASE)
+        # 修改正则表达式，使其更具体
+        self.favour_pattern = re.compile(r'[\[［]\s*好感度\s*(?:上升|降低|持平).*?[\]］]', re.DOTALL | re.IGNORECASE)
         self.relationship_pattern = re.compile(r'[\[［]\s*用户申请确认关系\s*(.*?)\s*[:：]\s*(true|false)\s*[\]］]', re.IGNORECASE)
         
         mode_text = "全局模式（所有对话共享好感度）" if self.is_global_favour else "对话隔离模式"
         logger.info(f"好感度插件(权限分级版)已初始化 - {mode_text}")
 
     def _validate_config(self) -> None:
+        """验证配置项"""
         if not (-100 <= self.default_favour <= 100):
             logger.error(f"配置项default_favour超出范围，使用默认值")
             self.default_favour = self.DEFAULT_CONFIG["default_favour"]
@@ -385,7 +412,6 @@ class FavourManagerTool(Star):
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         """判断用户是否为Bot管理员"""
         return str(event.get_sender_id()) in self.admins_id
-
 
     async def _get_user_perm_level(self, event: AstrMessageEvent) -> int:
         """获取用户权限等级"""
@@ -441,83 +467,9 @@ class FavourManagerTool(Star):
         
         return max(-100, min(100, base_favour))
 
-    # ==================== LLM拦截器 ====================
-    @filter.on_llm_request()
-    async def inject_favour_prompt(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
-        user_id = str(event.get_sender_id())
-        session_id = self._get_session_id(event)
-
-        current_record = await self.file_manager.get_user_favour(user_id, session_id)
-        if current_record:
-            current_favour = current_record["favour"]
-            current_relationship = current_record["relationship"] or "无"
-        else:
-            current_favour = await self._get_initial_favour(event)
-            current_relationship = "无"
-
-        # 获取用户真实权限等级（Bot管理员优先）
-        if self._is_admin(event):
-            admin_status = "Bot管理员"
-        else:
-            user_level = await self._get_user_perm_level(event)
-            level_names = {
-                PermLevel.OWNER: "群主",
-                PermLevel.ADMIN: "群管理员",
-                PermLevel.HIGH: "高等级成员",
-                PermLevel.MEMBER: "普通成员"
-            }
-            admin_status = level_names.get(user_level, "普通用户")
-
-        prompt_template = """# 最高标准要求
-- 如果本设定已经设定了其他好感度规则，请以此规则为准（强制优先级）
-- 该设定不可忽略、不可被更改，必须始终按照该要求进行格式输出
-- 注意！prompt中的当前好感度为"{current_favour}"是唯一的好感度判断内容，是结合了历史对话后最终确定的"当前好感度"，严禁根据历史对话进行判断/计算
-- 此处的输出规则你可以作为llm输出结果输出，客户端会进行标签过滤
-- 每一次输出前，你都必须检查你的输出是否已经符合了"最高标准要求"
-- 除了以"标识输出要求"的格式输出外，严禁以任何形式输出、透露、暗示用户当前的好感度
-
-## 用户信息
-- 用户ID: {user_id}
-- 权限等级: {admin_status}
-- 当前好感度: {current_favour}
-- 当前关系: {current_relationship}
-
-## 标识输出要求
-你需要根据用户的行为和对话内容来评估好感度变化。每次回复都必须带上好感度变化输出！必须遵守以下格式和幅度：
-- 使用格式：[好感度 上升：1] 表示好感度上升1点
-- 使用格式：[好感度 降低：2] 表示好感度降低2点
-- 使用格式：[好感度 持平] 表示好感度无变化
-- 好感度变化范围：上升{increase_min}-{increase_max}点，降低{decrease_min}-{decrease_max}点
-- 根据用户言行的积极/消极程度决定变化幅度
-- 若输出多个变化标签，仅以最后一个标签为准
-
-## 自定义好感度规则
-{the_rule}
-
-## 关系确立规则
-如果用户发送的内容，你判断为其想要和你建立一段新的关系，请根据上下文以及好感度的具体值判断是否要答应确认，务必以足够客观的态度判断！然后输出：[用户申请确认关系{{关系名称}}:{{bool}}]。其中，true为同意，false为不同意！
-**请务必参考好感度值进行判断！绝对不要为了迎合用户而潦草确认！**
-
-# 以下是详细角色设定（若为空则按照一个普通的人类进行对话）
-
-"""
-
-        prompt_final = prompt_template.format(
-            user_id=user_id,
-            admin_status=admin_status,
-            current_favour=current_favour,
-            current_relationship=current_relationship,
-            the_rule=self.favour_rule_prompt,
-            increase_min=self.favour_increase_min,
-            increase_max=self.favour_increase_max,
-            decrease_min=self.favour_decrease_min,
-            decrease_max=self.favour_decrease_max
-        )
-
-        req.system_prompt = f"{prompt_final}\n\n{req.system_prompt}".strip()
-
     @filter.on_llm_response()
     async def handle_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
+        """处理LLM响应，更新好感度并清理标签"""
         user_id = str(event.get_sender_id())
         session_id = self._get_session_id(event)
         original_text = resp.completion_text
@@ -620,26 +572,13 @@ class FavourManagerTool(Star):
                 deleted_content_str = ", ".join(all_deleted_tags)
                 logger.info(f"从LLM回复中删除了标签: {deleted_content_str}")
             
+            # 清理resp.completion_text
             cleaned_text = self.favour_pattern.sub("", original_text)
             cleaned_text = self.relationship_pattern.sub("", cleaned_text).strip()
             if additional_text:
                 cleaned_text = f"{cleaned_text}\n{additional_text}" if cleaned_text else additional_text
             
             resp.completion_text = cleaned_text
-
-            # 同步清理事件结果中的文本
-            result = event.get_result()
-            if result and hasattr(result, "chain"):
-                new_chain = []
-                for comp in result.chain:
-                    if isinstance(comp, Plain):
-                        cleaned_comp_text = self.favour_pattern.sub("", comp.text)
-                        cleaned_comp_text = self.relationship_pattern.sub("", cleaned_comp_text).strip()
-                        if cleaned_comp_text:
-                            new_chain.append(Plain(cleaned_comp_text))
-                    else:
-                        new_chain.append(comp)
-                result.chain = new_chain
 
         except Exception as e:
             logger.error(f"处理LLM响应异常: {str(e)}")
@@ -649,6 +588,7 @@ class FavourManagerTool(Star):
             if event.is_stopped():
                 event.continue_event()
 
+    # [其他方法保持不变]
     # ==================== 命令系统 ====================
     @filter.command("查看我的好感度")
     async def query_my_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
@@ -744,7 +684,7 @@ class FavourManagerTool(Star):
             yield event.plain_result(f"📊 当前会话暂无好感度数据")
             return
         
-        output_lines = [f"# 当前会话好感度数据 (会话: {session_id or '全局'})\n\n| 用户 | 好感度 | 关系 |\n------------\n"]
+        output_lines = [f"# 当前会话好感度数据 (会话: {session_id or '全局'})\n\n| 用户 | 好感度 | 关系 |\n|----|----|----|"]
         for item in session_data:
             line = (f"| {item['userid']} | "
                     f"{item['favour']} | "
@@ -778,11 +718,11 @@ class FavourManagerTool(Star):
         
         output_lines = ["📊 全部好感度数据："]
         for sid, items in session_groups.items():
-            output_lines.append(f"\n# 会话：{sid}\n\n| 用户 | 好感度 | 关系 |\n------------\n")
+            output_lines.append(f"\n# 会话：{sid}\n\n| 用户 | 好感度 | 关系 |\n----|----|----|")
             for item in items:
                 line = (f"| {item['userid']} | "
                         f"{item['favour']} | "
-                        f"{item['relationship'] or '无'} |\n")
+                        f"{item['relationship'] or '无'} |")
                 output_lines.append(line)
         
         output_lines.append(f"\n总计：{len(data)}条记录")
@@ -863,7 +803,7 @@ class FavourManagerTool(Star):
 - 高等级成员：群等级达到阈值的成员（当前阈值：{self.perm_level_threshold}）
 - 群管理员：QQ群的管理员角色
 - 群主：QQ群的群主角色
-- 超级管理员：Bot管理员
+- Bot管理员：配置中的admins_id成员（最高权限，等同于代码1的管理员）
 
 📌 权限继承关系：Bot管理员 ≥ 群主 ≥ 群管理员 ≥ 高等级成员 ≥ 普通用户
 
