@@ -1,6 +1,7 @@
 import json
 import re
 import traceback
+import string  # 移到文件顶部
 from pathlib import Path
 from typing import Dict, List, AsyncGenerator, Optional, Tuple, Any  
 import asyncio
@@ -8,7 +9,7 @@ from aiofiles import open as aio_open
 from aiofiles.os import path as aio_path
 from datetime import datetime
 
-from astrbot.core import logger
+from astrbot.api import logger  # 修正导入路径
 from astrbot.core.message.components import Plain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
@@ -16,6 +17,18 @@ from astrbot.api.star import Star, register, Context
 from astrbot.api import AstrBotConfig
 from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api.event import filter
+
+
+# ==================== 工具函数 ====================
+def is_valid_userid(userid: str) -> bool:
+    """验证用户ID格式是否有效"""
+    if not userid or len(userid.strip()) == 0:
+        return False
+    userid = userid.strip()
+    if len(userid) > 64:
+        return False
+    allowed_chars = string.ascii_letters + string.digits + "_-:@."
+    return all(c in allowed_chars for c in userid)
 
 
 # ==================== 权限系统 ====================
@@ -141,7 +154,7 @@ class GlobalFavourFileManager:
         return global_data.get(str(userid))
 
     async def update_global_favour(self, userid: str, favour: int) -> bool:
-        if not self._is_valid_userid(userid):
+        if not is_valid_userid(userid):  # 使用共享函数
             logger.error(f"更新全局好感度失败：用户ID[{userid}]格式无效")
             return False
         
@@ -150,16 +163,6 @@ class GlobalFavourFileManager:
             userid_str = str(userid)
             data[userid_str] = max(-100, min(100, favour))
             return await self.write_global_favour(data)  
-
-    def _is_valid_userid(self, userid: str) -> bool:
-        if not userid or len(userid.strip()) == 0:
-            return False
-        userid = userid.strip()
-        if len(userid) > 64:
-            return False
-        import string
-        allowed_chars = string.ascii_letters + string.digits + "_-:@."
-        return all(c in allowed_chars for c in userid)
 
 
 # ==================== 会话级好感度文件管理 ====================
@@ -251,7 +254,7 @@ class FavourFileManager:
 
     async def update_user_favour(self, userid: str, session_id: Optional[str], favour: Optional[int] = None, relationship: Optional[str] = None) -> bool:
         userid_str = userid.strip()
-        if not self._is_valid_userid(userid_str):
+        if not is_valid_userid(userid_str):  # 使用共享函数
             logger.error(f"更新好感度失败：用户ID[{userid_str}]格式无效")
             return False        
             
@@ -280,19 +283,9 @@ class FavourFileManager:
             
             return await self.write_favour(data)  
 
-    def _is_valid_userid(self, userid: str) -> bool:
-        if not userid or len(userid.strip()) == 0:
-            return False
-        userid = userid.strip()
-        if len(userid) > 64:
-            return False
-        import string
-        allowed_chars = string.ascii_letters + string.digits + "_-:@."
-        return all(c in allowed_chars for c in userid)
-
     async def delete_user_favour(self, userid: str, session_id: Optional[str] = None) -> Tuple[bool, str]:
         userid_str = userid.strip()
-        if not self._is_valid_userid(userid_str):
+        if not is_valid_userid(userid_str):  # 使用共享函数
             return False, f"删除失败：用户ID[{userid_str}]格式无效"        
             
         async with self.lock:
@@ -348,8 +341,7 @@ class FavourManagerTool(Star):
         
         self._validate_config()
         
-        # 初始化权限管理器
-        self.admins_id = context.get_config().get("admins_id", [])
+        self.admins_id = context.get_config().get("admins_id", [])# 按照人机审核结果修改后提示context中没那个方法
         self.perm_level_threshold = self.config.get("level_threshold", self.DEFAULT_CONFIG["level_threshold"])
         
         PermissionManager.get_instance(
@@ -391,18 +383,16 @@ class FavourManagerTool(Star):
             self.is_global_favour = self.DEFAULT_CONFIG["is_global_favour"]
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
-        """判断用户是否为Bot管理员（对应代码1的管理员权限）"""
-        return event.role == "admin"
+        """判断用户是否为Bot管理员"""
+        return str(event.get_sender_id()) in self.admins_id
+
 
     async def _get_user_perm_level(self, event: AstrMessageEvent) -> int:
         """获取用户权限等级"""
-        # 优先检查Bot管理员（对应代码1的管理员）
         if self._is_admin(event):
             return PermLevel.SUPERUSER
-        
         if not isinstance(event, AiocqhttpMessageEvent):
             return PermLevel.UNKNOWN
-        
         perm_mgr = PermissionManager.get_instance()
         return await perm_mgr.get_perm_level(event, event.get_sender_id())
 
@@ -440,10 +430,11 @@ class FavourManagerTool(Star):
                 return global_favour
 
         is_envoy = await self._is_envoy(user_id)
-        # 使用Bot管理员判断（对应代码1逻辑）
-        if self._is_admin(event) or is_envoy:
+        user_level = await self._get_user_perm_level(event)
+        
+        if user_level >= PermLevel.ADMIN or is_envoy:
             base_favour = self.admin_default_favour
-            logger.debug(f"用户[{user_id}]为Bot管理员/特使，初始好感度：{base_favour}")
+            logger.debug(f"用户[{user_id}]为管理员/特使，初始好感度：{base_favour}")
         else:
             base_favour = self.default_favour
             logger.debug(f"用户[{user_id}]为普通用户，初始好感度：{base_favour}")
@@ -497,7 +488,7 @@ class FavourManagerTool(Star):
 - 使用格式：[好感度 降低：2] 表示好感度降低2点
 - 使用格式：[好感度 持平] 表示好感度无变化
 - 好感度变化范围：上升{increase_min}-{increase_max}点，降低{decrease_min}-{decrease_max}点
-- 根据用户言行的积极/消极程度决定变化幅度。注意上升难度比降低难度高！
+- 根据用户言行的积极/消极程度决定变化幅度
 - 若输出多个变化标签，仅以最后一个标签为准
 
 ## 自定义好感度规则
@@ -753,11 +744,11 @@ class FavourManagerTool(Star):
             yield event.plain_result(f"📊 当前会话暂无好感度数据")
             return
         
-        output_lines = [f"# 当前会话好感度数据 (会话: {session_id or '全局'})"]
+        output_lines = [f"# 当前会话好感度数据 (会话: {session_id or '全局'})\n\n| 用户 | 好感度 | 关系 |\n------------\n"]
         for item in session_data:
-            line = (f"- 用户：{item['userid']} | "
-                    f"好感度：{item['favour']} | "
-                    f"关系：{item['relationship'] or '无'}|")
+            line = (f"| {item['userid']} | "
+                    f"{item['favour']} | "
+                    f"{item['relationship'] or '无'} |")
             output_lines.append(line)
         
         output_lines.append(f"\n总计：{len(session_data)}条记录")
@@ -787,11 +778,11 @@ class FavourManagerTool(Star):
         
         output_lines = ["📊 全部好感度数据："]
         for sid, items in session_groups.items():
-            output_lines.append(f"\n#【会话：{sid}】")
+            output_lines.append(f"\n# 会话：{sid}\n\n| 用户 | 好感度 | 关系 |\n------------\n")
             for item in items:
-                line = (f"| 用户：{item['userid']} | "
-                        f"好感度：{item['favour']} | "
-                        f"关系：{item['relationship'] or '无'}|")
+                line = (f"| {item['userid']} | "
+                        f"{item['favour']} | "
+                        f"{item['relationship'] or '无'} |\n")
                 output_lines.append(line)
         
         output_lines.append(f"\n总计：{len(data)}条记录")
@@ -872,7 +863,7 @@ class FavourManagerTool(Star):
 - 高等级成员：群等级达到阈值的成员（当前阈值：{self.perm_level_threshold}）
 - 群管理员：QQ群的管理员角色
 - 群主：QQ群的群主角色
-- Bot管理员：配置中的admins_id成员（最高权限，等同于代码1的管理员）
+- 超级管理员：Bot管理员
 
 📌 权限继承关系：Bot管理员 ≥ 群主 ≥ 群管理员 ≥ 高等级成员 ≥ 普通用户
 
@@ -901,18 +892,6 @@ class FavourManagerTool(Star):
 ==================
 """
         yield event.plain_result(help_text)
-
     async def terminate(self) -> None:
-        """插件卸载时保存数据"""
-        try:
-            favour_data = await self.file_manager.read_favour()
-            
-            if not isinstance(favour_data, list):
-                raise ValueError(f"读取的数据格式无效（非list）：{type(favour_data)}")
-            
-            await self.file_manager.write_favour(favour_data)
-            logger.info(f"好感度管理插件已卸载，数据已保存（记录数：{len(favour_data)}）")
-        
-        except Exception as e:
-            logger.error(f"插件卸载时保存数据失败: {str(e)}")
-            logger.error(f"异常堆栈: {traceback.format_exc()}")
+        """插件卸载时的清理工作"""
+        pass  # 数据已经实时保存，不需要额外操作
