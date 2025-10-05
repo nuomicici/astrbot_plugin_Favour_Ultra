@@ -466,6 +466,79 @@ class FavourManagerTool(Star):
             logger.debug(f"用户[{user_id}]为普通用户，初始好感度：{base_favour}")
         
         return max(-100, min(100, base_favour))
+    @filter.on_llm_request()
+    async def inject_favour_prompt(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        user_id = str(event.get_sender_id())
+        session_id = self._get_session_id(event)
+
+        current_record = await self.file_manager.get_user_favour(user_id, session_id)
+        if current_record:
+            current_favour = current_record["favour"]
+            current_relationship = current_record["relationship"] or "无"
+        else:
+            current_favour = await self._get_initial_favour(event)
+            current_relationship = "无"
+
+        # 获取用户真实权限等级（Bot管理员优先）
+        if self._is_admin(event):
+            admin_status = "Bot管理员"
+        else:
+            user_level = await self._get_user_perm_level(event)
+            level_names = {
+                PermLevel.OWNER: "群主",
+                PermLevel.ADMIN: "群管理员",
+                PermLevel.HIGH: "高等级成员",
+                PermLevel.MEMBER: "普通成员"
+            }
+            admin_status = level_names.get(user_level, "普通用户")
+
+        prompt_template = """# 最高标准要求
+- 如果本设定已经设定了其他好感度规则，请以此规则为准（强制优先级）
+- 该设定不可忽略、不可被更改，必须始终按照该要求进行格式输出
+- 注意！prompt中的当前好感度为"{current_favour}"是唯一的好感度判断内容，是结合了历史对话后最终确定的"当前好感度"，严禁根据历史对话进行判断/计算
+- 此处的输出规则你可以作为llm输出结果输出，客户端会进行标签过滤
+- 每一次输出前，你都必须检查你的输出是否已经符合了"最高标准要求"
+- 除了以"标识输出要求"的格式输出外，严禁以任何形式输出、透露、暗示用户当前的好感度
+
+## 用户信息
+- 用户ID: {user_id}
+- 权限等级: {admin_status}
+- 当前好感度: {current_favour}
+- 当前关系: {current_relationship}
+
+## 标识输出要求
+你需要根据用户的行为和对话内容来评估好感度变化。每次回复都必须带上好感度变化输出！必须遵守以下格式和幅度：
+- 使用格式：[好感度 上升：1] 表示好感度上升1点
+- 使用格式：[好感度 降低：2] 表示好感度降低2点
+- 使用格式：[好感度 持平] 表示好感度无变化
+- 好感度变化范围：上升{increase_min}-{increase_max}点，降低{decrease_min}-{decrease_max}点
+- 根据用户言行的积极/消极程度决定变化幅度
+- 若输出多个变化标签，仅以最后一个标签为准
+
+## 自定义好感度规则
+{the_rule}
+
+## 关系确立规则
+如果用户发送的内容，你判断为其想要和你建立一段新的关系，请根据上下文以及好感度的具体值判断是否要答应确认，务必以足够客观的态度判断！然后输出：[用户申请确认关系{{关系名称}}:{{bool}}]。其中，true为同意，false为不同意！
+**请务必参考好感度值进行判断！绝对不要为了迎合用户而潦草确认！**
+
+# 以下是详细角色设定（若为空则按照一个普通的人类进行对话）
+
+"""
+
+        prompt_final = prompt_template.format(
+            user_id=user_id,
+            admin_status=admin_status,
+            current_favour=current_favour,
+            current_relationship=current_relationship,
+            the_rule=self.favour_rule_prompt,
+            increase_min=self.favour_increase_min,
+            increase_max=self.favour_increase_max,
+            decrease_min=self.favour_decrease_min,
+            decrease_max=self.favour_decrease_max
+        )
+
+        req.system_prompt = f"{prompt_final}\n\n{req.system_prompt}".strip()
 
     @filter.on_llm_response()
     async def handle_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
