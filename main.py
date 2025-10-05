@@ -692,7 +692,14 @@ class FavourManagerTool(Star):
             output_lines.append(line)
         
         output_lines.append(f"\n总计：{len(session_data)}条记录")
-        yield event.plain_result("\n".join(output_lines))
+        text = "\n".join(output_lines)
+        # 转换为图片
+        try:
+            url = await self.text_to_image(text)
+            yield event.image_result(url)
+        except Exception as e:
+            logger.error(f"生成图片失败: {str(e)}")
+            yield event.plain_result(text)
 
     @filter.command("查询全部好感度")
     async def query_all_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
@@ -726,8 +733,14 @@ class FavourManagerTool(Star):
                 output_lines.append(line)
         
         output_lines.append(f"\n总计：{len(data)}条记录")
-        yield event.plain_result("\n".join(output_lines))
-
+        text = "\n".join(output_lines)
+        try:
+            url = await self.text_to_image(text)
+            yield event.image_result(url)
+        except Exception as e:
+            logger.error(f"生成图片失败: {str(e)}")
+            yield event.plain_result(text)
+            
     @filter.command("清空当前好感度")
     async def clear_conversation_favour_prompt(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """群主专用：清空当前会话好感度（需二次确认）"""
