@@ -58,5 +58,11 @@
     "type": "int",
     "default": 5,
     "hint": "LLM返回下降时的最大幅度（需≥好感度下降最小值（绝对值））"
-  }
+  },
+"level_threshold": {
+    "description": "高级会员等级阈值",
+    "type": "int",
+    "default": 50,
+    "hint": "群成员等级达到此值时视为HIGH权限，具体用来干啥我还没确定"
+}
 }
