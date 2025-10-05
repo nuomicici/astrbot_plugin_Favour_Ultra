@@ -468,101 +468,6 @@ class FavourManagerTool(Star):
         return max(-100, min(100, base_favour))
 
     @filter.on_llm_response()
-    def _parse_favour_change(self, text: str) -> int:
-        """解析文本中的好感度变化值"""
-        change = 0
-        favour_matches = self.favour_pattern.findall(text)
-        if favour_matches:
-            match = favour_matches[-1].lower().strip()
-            if "降低" in match:
-                n_match = re.search(r'降低\s*[:：]?\s*(\d+)', match)
-                if n_match:
-                    try:
-                        n = int(n_match.group(1).strip())
-                        change = -max(self.favour_decrease_min, min(self.favour_decrease_max, n))
-                    except (ValueError, TypeError):
-                        pass
-            elif "上升" in match:
-                n_match = re.search(r'上升\s*[:：]?\s*(-?\d+)', match)
-                if n_match:
-                    try:
-                        n = abs(int(n_match.group(1).strip()))
-                        change = max(self.favour_increase_min, min(self.favour_increase_max, n))
-                    except (ValueError, TypeError):
-                        pass
-            elif "持平" in match:
-                change = 0
-        return change
-
-    def _parse_relationship_update(self, text: str) -> Optional[str]:
-        """解析关系更新"""
-        rel_matches = self.relationship_pattern.findall(text)
-        if rel_matches:
-            rel_name, rel_bool = rel_matches[-1]
-            if rel_bool.lower() == "true" and rel_name.strip():
-                return rel_name.strip()
-        return None
-
-    async def _apply_favour_updates(self, user_id: str, session_id: Optional[str], 
-                                  favour_change: int, relationship_update: Optional[str]) -> Tuple[str, str]:
-        """应用好感度和关系更新，并返回最终的回复文本和附加文本"""
-        current_record = await self.file_manager.get_user_favour(user_id, session_id)
-        additional_text = None
-
-        if current_record:
-            old_favour = current_record["favour"]
-            new_favour = max(-100, min(100, old_favour + favour_change))
-            old_relationship = current_record.get("relationship", "") or ""
-            
-            final_relationship = old_relationship
-            
-            if relationship_update is not None:
-                final_relationship = relationship_update
-            
-            if new_favour < 0 and old_relationship:
-                final_relationship = ""
-                additional_text = f"还有，我不想和你做{old_relationship}了。"
-
-            favour_changed = (new_favour != old_favour)
-            relationship_changed = (final_relationship != old_relationship)
-
-            if favour_changed or relationship_changed:
-                logger.info(
-                    f"用户[{user_id}]数据更新 (会话: {session_id}):\n"
-                    f"  ├─ 好感度: {old_favour} → {new_favour} (变化: {favour_change})\n"
-                    f"  └─ 关系: '{old_relationship}' → '{final_relationship}'"
-                )
-                await self.file_manager.update_user_favour(
-                    userid=user_id,
-                    session_id=session_id,
-                    favour=new_favour if favour_changed else None,
-                    relationship=final_relationship if relationship_changed else None
-                )
-        else:
-            initial_favour = await self._get_initial_favour(event)
-            final_relationship = relationship_update or ""
-            
-            if initial_favour < 0 and final_relationship:
-                additional_text = f"还有，我不想和你做{final_relationship}了。"
-                final_relationship = ""
-
-            logger.info(f"新用户[{user_id}]注册 (会话: {session_id}), 初始好感度: {initial_favour}, 初始关系: '{final_relationship}'")
-            await self.file_manager.update_user_favour(
-                userid=user_id,
-                session_id=session_id,
-                favour=initial_favour,
-                relationship=final_relationship
-            )
-
-        return "", additional_text or ""
-
-    def _clean_response_text(self, text: str) -> str:
-        """从文本中移除所有处理过的标签"""
-        cleaned_text = self.favour_pattern.sub("", text)
-        cleaned_text = self.relationship_pattern.sub("", cleaned_text).strip()
-        return cleaned_text
-
-    @filter.on_llm_response()
     async def handle_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
         """处理LLM响应，更新好感度并清理标签"""
         user_id = str(event.get_sender_id())
@@ -570,21 +475,106 @@ class FavourManagerTool(Star):
         original_text = resp.completion_text
 
         try:
-            # 解析好感度变化
-            favour_change = self._parse_favour_change(original_text)
+            additional_text = None
+            change_n = 0
+
+            # 提取好感度变化标签
+            favour_matches = self.favour_pattern.findall(original_text)
+            if favour_matches:
+                for idx, match in enumerate(favour_matches):
+                    match_str = match.lower().strip()
+                    temp_change = 0
+                    if "降低" in match_str:
+                        n_match = re.search(r'降低\s*[:：]?\s*(\d+)', match_str)
+                        if n_match:
+                            try:
+                                n = int(n_match.group(1).strip())
+                                temp_change = -max(self.favour_decrease_min, min(self.favour_decrease_max, n))
+                            except (ValueError, TypeError): pass
+                    elif "上升" in match_str:
+                        n_match = re.search(r'上升\s*[:：]?\s*(-?\d+)', match_str)
+                        if n_match:
+                            try:
+                                n = abs(int(n_match.group(1).strip()))
+                                temp_change = max(self.favour_increase_min, min(self.favour_increase_max, n))
+                            except (ValueError, TypeError): pass
+                    elif "持平" in match_str:
+                        temp_change = 0
+                    
+                    if idx == len(favour_matches) - 1:
+                        change_n = temp_change
+
+            # 提取关系确认标签
+            relationship_update = None
+            rel_matches = self.relationship_pattern.findall(original_text)
+            if rel_matches:
+                rel_name, rel_bool = rel_matches[-1]
+                if rel_bool.lower() == "true" and rel_name.strip():
+                    relationship_update = rel_name.strip()
+
+            # 更新用户好感度数据
+            current_record = await self.file_manager.get_user_favour(user_id, session_id)
             
-            # 解析关系更新
-            relationship_update = self._parse_relationship_update(original_text)
+            if current_record:
+                old_favour = current_record["favour"]
+                new_favour = max(-100, min(100, old_favour + change_n))
+                old_relationship = current_record.get("relationship", "") or ""
+                
+                final_relationship = old_relationship
+                
+                if relationship_update is not None:
+                    final_relationship = relationship_update
+                
+                if new_favour < 0 and old_relationship:
+                    final_relationship = ""
+                    additional_text = f"还有，我不想和你做{old_relationship}了。"
+
+                favour_changed = (new_favour != old_favour)
+                relationship_changed = (final_relationship != old_relationship)
+
+                if favour_changed or relationship_changed:
+                    logger.info(
+                        f"用户[{user_id}]数据更新 (会话: {session_id}):\n"
+                        f"  ├─ 好感度: {old_favour} → {new_favour} (变化: {change_n})\n"
+                        f"  └─ 关系: '{old_relationship}' → '{final_relationship}'"
+                    )
+                    await self.file_manager.update_user_favour(
+                        userid=user_id,
+                        session_id=session_id,
+                        favour=new_favour if favour_changed else None,
+                        relationship=final_relationship if relationship_changed else None
+                    )
+            else:
+                initial_favour = await self._get_initial_favour(event)
+                final_relationship = relationship_update or ""
+                
+                if initial_favour < 0 and final_relationship:
+                    additional_text = f"还有，我不想和你做{final_relationship}了。"
+                    final_relationship = ""
+
+                logger.info(f"新用户[{user_id}]注册 (会话: {session_id}), 初始好感度: {initial_favour}, 初始关系: '{final_relationship}'")
+                await self.file_manager.update_user_favour(
+                    userid=user_id,
+                    session_id=session_id,
+                    favour=initial_favour,
+                    relationship=final_relationship
+                )
+
+            # 清理LLM输出文本
+            all_deleted_tags = []
+            if favour_matches:
+                all_deleted_tags.extend(favour_matches)
             
-            # 应用更新并获取附加文本
-            _, additional_text = await self._apply_favour_updates(
-                user_id, session_id, favour_change, relationship_update
-            )
+            full_relationship_tags_iter = self.relationship_pattern.finditer(original_text)
+            all_deleted_tags.extend([match.group(0) for match in full_relationship_tags_iter])
+
+            if all_deleted_tags:
+                deleted_content_str = ", ".join(all_deleted_tags)
+                logger.info(f"从LLM回复中删除了标签: {deleted_content_str}")
             
-            # 清理响应文本
-            cleaned_text = self._clean_response_text(original_text)
-            
-            # 添加附加文本
+            # 清理resp.completion_text
+            cleaned_text = self.favour_pattern.sub("", original_text)
+            cleaned_text = self.relationship_pattern.sub("", cleaned_text).strip()
             if additional_text:
                 cleaned_text = f"{cleaned_text}\n{additional_text}" if cleaned_text else additional_text
             
