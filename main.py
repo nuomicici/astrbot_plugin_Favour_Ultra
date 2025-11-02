@@ -581,22 +581,24 @@ class FavourManagerTool(Star):
 
         try:
             update_data = {'favour_change': 0, 'relationship_update': None}
+            has_favour_tag = False
 
             # 1. 解析好感度变化并实现精细化日志
             favour_matches = self.favour_pattern.findall(original_text)
             
             if not favour_matches:
-                # Case 1: 完全没有匹配到标签
                 logger.error("无法从LLM响应中获取任何好感度标签，请检查你的人格配置中是否有配置好感度相关内容，如果有，请删除")
                 logger.warn("如果包含标签但没有被获取并出现错误，请前往gitgub提交issues，或添加QQ群3218444911")
             else:
+                has_favour_tag = True
                 valid_changes = []
                 for match in favour_matches:
                     match_str = match.lower().strip()
                     temp_change = None
                     
-                    # 尝试解析标签内容
-                    if "降低" in match_str:
+                    if "持平" in match_str:
+                        temp_change = 0
+                    elif "降低" in match_str:
                         n_match = re.search(r'降低\s*[:：]?\s*(\d+)', match_str)
                         if n_match:
                             try:
@@ -610,30 +612,28 @@ class FavourManagerTool(Star):
                                 n = abs(int(n_match.group(1).strip()))
                                 temp_change = max(self.favour_increase_min, min(self.favour_increase_max, n))
                             except (ValueError, TypeError): pass
-                    elif "持平" in match_str:
-                        temp_change = 0
                     
-                    # 根据解析结果输出不同级别的日志
                     if temp_change is not None:
-                        # Case 2: 匹配到且成功解析
-                        logger.debug(f"有效标签: '{match}', 解析值: {temp_change}")
+                        # 【关键修改】针对“持平”输出特殊日志
+                        if temp_change == 0 and "持平" in match_str:
+                            logger.debug(f"有效标签: '{match}', 无需解析")
+                        else:
+                            logger.debug(f"有效标签: '{match}', 解析值: {temp_change}")
                         valid_changes.append(temp_change)
                     else:
-                        # Case 3: 匹配到但无法解析
                         logger.warn(f"获取到无效标签: '{match}'。请检查你的人格配置中是否有配置好感度相关内容，如果有，请删除")
 
                 if valid_changes:
                     update_data['favour_change'] = valid_changes[-1]
             
-            # 2. 解析关系变化 (逻辑不变)
+            # 2. 解析关系变化
             rel_matches = self.relationship_pattern.findall(original_text)
             if rel_matches:
                 rel_name, rel_bool = rel_matches[-1]
                 if rel_bool.lower() == "true" and rel_name.strip():
                     update_data['relationship_update'] = rel_name.strip()
 
-            # 只有在检测到有效变化时才存入待办字典
-            if update_data['favour_change'] != 0 or update_data['relationship_update'] is not None:
+            if has_favour_tag or update_data['relationship_update'] is not None:
                 self.pending_updates[message_id] = update_data
                 logger.debug(f"好感度解析完成 (Message ID: {message_id}): {update_data}")
 
@@ -666,51 +666,56 @@ class FavourManagerTool(Star):
         session_id = self._get_session_id(event)
 
         try:
-            current_record = await self.file_manager.get_user_favour(user_id, session_id)
-            if current_record:
-                old_favour = current_record["favour"]
-                new_favour = max(-100, min(100, old_favour + change_n))
-                old_relationship = current_record.get("relationship", "") or ""
-                
-                final_relationship = old_relationship
-                if relationship_update is not None:
-                    final_relationship = relationship_update
-                
-                if new_favour < 0 and old_relationship:
-                    final_relationship = ""
+            # 【关键修改】如果没有任何实际变化，则记录日志并跳过数据库操作
+            if change_n == 0 and relationship_update is None:
+                logger.info(f"用户[{user_id}]数据无更新")
+            else:
+                # 1. 执行数据库更新
+                current_record = await self.file_manager.get_user_favour(user_id, session_id)
+                if current_record:
+                    old_favour = current_record["favour"]
+                    new_favour = max(-100, min(100, old_favour + change_n))
+                    old_relationship = current_record.get("relationship", "") or ""
+                    
+                    final_relationship = old_relationship
+                    if relationship_update is not None:
+                        final_relationship = relationship_update
+                    
+                    if new_favour < 0 and old_relationship:
+                        final_relationship = ""
 
-                favour_changed = (new_favour != old_favour)
-                relationship_changed = (final_relationship != old_relationship)
+                    favour_changed = (new_favour != old_favour)
+                    relationship_changed = (final_relationship != old_relationship)
 
-                if favour_changed or relationship_changed:
-                    logger.info(
-                        f"用户[{user_id}]数据更新 (会话: {session_id}):\n"
-                        f"  ├─ 好感度: {old_favour} → {new_favour} (变化: {change_n})\n"
-                        f"  └─ 关系: '{old_relationship}' → '{final_relationship}'"
-                    )
+                    if favour_changed or relationship_changed:
+                        logger.info(
+                            f"用户[{user_id}]数据更新 (会话: {session_id}):\n"
+                            f"  ├─ 好感度: {old_favour} → {new_favour} (变化: {change_n})\n"
+                            f"  └─ 关系: '{old_relationship}' → '{final_relationship}'"
+                        )
+                        await self.file_manager.update_user_favour(
+                            userid=user_id,
+                            session_id=session_id,
+                            favour=new_favour if favour_changed else None,
+                            relationship=final_relationship if relationship_changed else None
+                        )
+                else: # 如果是新用户
+                    initial_favour = await self._get_initial_favour(event)
+                    new_favour = max(-100, min(100, initial_favour + change_n))
+                    final_relationship = relationship_update or ""
+                    
+                    if new_favour < 0 and final_relationship:
+                        final_relationship = ""
+
+                    logger.info(f"新用户[{user_id}]注册 (会话: {session_id}), 好感度: {new_favour}, 关系: '{final_relationship}'")
                     await self.file_manager.update_user_favour(
                         userid=user_id,
                         session_id=session_id,
-                        favour=new_favour if favour_changed else None,
-                        relationship=final_relationship if relationship_changed else None
+                        favour=new_favour,
+                        relationship=final_relationship
                     )
-            else: # 如果是新用户
-                initial_favour = await self._get_initial_favour(event)
-                new_favour = max(-100, min(100, initial_favour + change_n))
-                final_relationship = relationship_update or ""
-                
-                if new_favour < 0 and final_relationship:
-                    final_relationship = ""
 
-                logger.info(f"新用户[{user_id}]注册 (会话: {session_id}), 好感度: {new_favour}, 关系: '{final_relationship}'")
-                await self.file_manager.update_user_favour(
-                    userid=user_id,
-                    session_id=session_id,
-                    favour=new_favour,
-                    relationship=final_relationship
-                )
-
-            # 2. 构建新的消息链来清理标签
+            # 2. 清理标签的逻辑必须始终执行
             new_chain = []
             cleaned = False
             for comp in result.chain:
@@ -722,14 +727,11 @@ class FavourManagerTool(Star):
                     if original_text != cleaned_text:
                         cleaned = True
                     
-                    # 无论是否修改，都添加新的 Plain 对象到 new_chain
-                    if cleaned_text: # 避免添加空消息段
+                    if cleaned_text:
                         new_chain.append(Plain(text=cleaned_text))
                 else:
-                    # 对于非文本组件，直接添加到新链中
                     new_chain.append(comp)
             
-            # 如果执行过清理，则用新链替换旧链
             if cleaned:
                 logger.info(f"消息发送前清理标签完成。")
                 result.chain = new_chain
