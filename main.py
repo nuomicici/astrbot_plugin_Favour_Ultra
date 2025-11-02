@@ -356,7 +356,7 @@ class FavourFileManager(AsyncJsonFileManager):
     "astrbot_plugin_favour_ultra",
     "糯米茨",
     "好感度管理插件",
-    "v2.1"
+    "v2.3"
 )
 class FavourManagerTool(Star):
     DEFAULT_CONFIG = {
