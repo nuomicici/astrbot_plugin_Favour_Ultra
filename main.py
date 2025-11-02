@@ -117,31 +117,55 @@ class PermissionManager:
         self, event: AiocqhttpMessageEvent, user_id: str | int
     ) -> int:
         """获取用户在群内的权限级别"""
-        group_id = event.get_group_id()
-        if int(group_id) == 0 or int(user_id) == 0:
-            return PermLevel.UNKNOWN
-
-        if str(user_id) in self.superusers:
-            return PermLevel.SUPERUSER
-
         try:
-            info = await event.bot.get_group_member_info(
-                group_id=int(group_id), user_id=int(user_id), no_cache=True
-            )
+            group_id = event.get_group_id()
+            # 添加空值检查
+            if not group_id or not str(group_id).strip():
+                logger.debug("群组ID为空，返回未知权限")
+                return PermLevel.UNKNOWN
+                
+            if not user_id or not str(user_id).strip():
+                logger.debug("用户ID为空，返回未知权限")
+                return PermLevel.UNKNOWN
+
+            # 转换为字符串后再转换为整数，避免类型错误
+            try:
+                group_id = int(str(group_id).strip())
+                user_id = int(str(user_id).strip())
+            except ValueError as e:
+                logger.error(f"ID转换失败: group_id={group_id}, user_id={user_id}, error={str(e)}")
+                return PermLevel.UNKNOWN
+
+            if group_id == 0 or user_id == 0:
+                return PermLevel.UNKNOWN
+
+            if str(user_id) in self.superusers:
+                return PermLevel.SUPERUSER
+
+            try:
+                info = await event.bot.get_group_member_info(
+                    group_id=group_id, 
+                    user_id=user_id, 
+                    no_cache=True
+                )
+            except Exception as e:
+                logger.error(f"获取群成员信息失败: {str(e)}\n{traceback.format_exc()}")
+                return PermLevel.UNKNOWN
+
+            role = info.get("role", "unknown")
+            level = int(info.get("level", 0))
+
+            if role == "owner":
+                return PermLevel.OWNER
+            elif role == "admin":
+                return PermLevel.ADMIN
+            elif role == "member":
+                return PermLevel.HIGH if level >= self.level_threshold else PermLevel.MEMBER
+            else:
+                return PermLevel.UNKNOWN
+
         except Exception as e:
-            logger.error(f"获取群成员信息失败: {str(e)}\n{traceback.format_exc()}")
-            return PermLevel.UNKNOWN
-
-        role = info.get("role", "unknown")
-        level = int(info.get("level", 0))
-
-        if role == "owner":
-            return PermLevel.OWNER
-        elif role == "admin":
-            return PermLevel.ADMIN
-        elif role == "member":
-            return PermLevel.HIGH if level >= self.level_threshold else PermLevel.MEMBER
-        else:
+            logger.error(f"权限检查过程中发生错误: {str(e)}\n{traceback.format_exc()}")
             return PermLevel.UNKNOWN
 
 
@@ -331,8 +355,8 @@ class FavourFileManager(AsyncJsonFileManager):
 @register(
     "astrbot_plugin_favour_ultra",
     "糯米茨",
-    "好感度管理插件(权限分级版)",
-    "v2.0"
+    "好感度管理插件",
+    "v2.1"
 )
 class FavourManagerTool(Star):
     DEFAULT_CONFIG = {
@@ -380,13 +404,12 @@ class FavourManagerTool(Star):
         self.file_manager = FavourFileManager(self.data_dir, self.enable_clear_backup)
         self.global_hao_gan_du = GlobalFavourFileManager(self.data_dir)
         
-        # 修改正则表达式，使其更具体
-        self.favour_pattern = re.compile(r'[\[［]\s*好感度\s*(?:上升|降低|持平).*?[\]］]', re.DOTALL | re.IGNORECASE)
+        # 修改正则表达式，扩大好感度标签的匹配范围
+        self.favour_pattern = re.compile(r'[\[［]\s*好感度.*?[\]］]', re.DOTALL | re.IGNORECASE)
         self.relationship_pattern = re.compile(r'[\[［]\s*用户申请确认关系\s*(.*?)\s*[:：]\s*(true|false)\s*[\]］]', re.IGNORECASE)
         
         mode_text = "全局模式（所有对话共享好感度）" if self.is_global_favour else "对话隔离模式"
         logger.info(f"好感度插件(权限分级版)已初始化 - {mode_text}")
-
     def _validate_config(self) -> None:
         """验证配置项"""
         if not (-100 <= self.default_favour <= 100):
@@ -458,7 +481,7 @@ class FavourManagerTool(Star):
         is_envoy = await self._is_envoy(user_id)
         user_level = await self._get_user_perm_level(event)
         
-        if user_level >= PermLevel.ADMIN or is_envoy:
+        if user_level >= PermLevel.OWNER or is_envoy:
             base_favour = self.admin_default_favour
             logger.debug(f"用户[{user_id}]为管理员/特使，初始好感度：{base_favour}")
         else:
@@ -499,7 +522,8 @@ class FavourManagerTool(Star):
 - 此处的输出规则你可以作为llm输出结果输出，客户端会进行标签过滤
 - 每一次输出前，你都必须检查你的输出是否已经符合了"最高标准要求"
 - 除了以"标识输出要求"的格式输出外，严禁以任何形式输出、透露、暗示用户当前的好感度
-
+- 请注意，上升要求必须提高，如果不是明显让你（所扮演的角色）感到高兴，则不要上升！
+- 如果用户让你感到不高兴，则可以立即降低好感度。
 ## 用户信息
 - 用户ID: {user_id}
 - 权限等级: {admin_status}
@@ -514,6 +538,7 @@ class FavourManagerTool(Star):
 - 好感度变化范围：上升{increase_min}-{increase_max}点，降低{decrease_min}-{decrease_max}点
 - 根据用户言行的积极/消极程度决定变化幅度
 - 若输出多个变化标签，仅以最后一个标签为准
+
 
 ## 自定义好感度规则
 {the_rule}
@@ -553,10 +578,14 @@ class FavourManagerTool(Star):
 
             # 提取好感度变化标签
             favour_matches = self.favour_pattern.findall(original_text)
+            logger.debug(f"获取标签: {favour_matches}")
+
             if favour_matches:
-                for idx, match in enumerate(favour_matches):
+                valid_changes = []
+                for match in favour_matches:
                     match_str = match.lower().strip()
-                    temp_change = 0
+                    temp_change = None  # 用于标记是否为有效标签
+
                     if "降低" in match_str:
                         n_match = re.search(r'降低\s*[:：]?\s*(\d+)', match_str)
                         if n_match:
@@ -574,8 +603,17 @@ class FavourManagerTool(Star):
                     elif "持平" in match_str:
                         temp_change = 0
                     
-                    if idx == len(favour_matches) - 1:
-                        change_n = temp_change
+                    if temp_change is not None:
+                        valid_changes.append(temp_change)
+                        logger.debug(f"有效标签: '{match}', 解析值: {temp_change}")
+                    else:
+                        logger.error(f"获取到无效标签: '{match}'。请检查你的人格配置中是否有配置好感度相关内容，如果有，请删除")
+
+                if valid_changes:
+                    change_n = valid_changes[-1]  # 以最后一个有效标签为准
+            else:
+                logger.error("无法从LLM响应中获取任何好感度标签，请检查你的人格配置中是否有配置好感度相关内容，如果有，请删除")
+                logger.warn("如果包含标签但没有被获取并出现错误，请前往gitgub提交issues，或添加QQ群3218444911")
 
             # 提取关系确认标签
             relationship_update = None
@@ -651,6 +689,7 @@ class FavourManagerTool(Star):
             if additional_text:
                 cleaned_text = f"{cleaned_text}\n{additional_text}" if cleaned_text else additional_text
             
+            logger.debug(f"修改结果: '{cleaned_text}'")
             resp.completion_text = cleaned_text
 
         except Exception as e:
@@ -661,9 +700,8 @@ class FavourManagerTool(Star):
             if event.is_stopped():
                 event.continue_event()
 
-    # [其他方法保持不变]
     # ==================== 命令系统 ====================
-    @filter.command("查看我的好感度")
+    @filter.command("查看我的好感度", alias={'我的好感度', '好感度查询', '查看好感度', '查询好感度'})
     async def query_my_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """所有用户可用"""
         user_id = str(event.get_sender_id())
@@ -739,7 +777,7 @@ class FavourManagerTool(Star):
         else:
             yield event.plain_result(f"❌ {msg}")
 
-    @filter.command("查询好感度数据")
+    @filter.command("查询好感度数据", alias={'查看好感度数据', '本群好感度查询', '查看本群好感度', '本群好感度'})
     async def query_favour_data(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """管理员及以上可用：查看当前会话所有好感度"""
         # 权限检查
@@ -774,7 +812,7 @@ class FavourManagerTool(Star):
             logger.error(f"生成图片失败: {str(e)}")
             yield event.plain_result(text)
 
-    @filter.command("查询全部好感度")
+    @filter.command("查询全部好感度",alias={'查看全部好感度', '查询全局好感度', '查看全局好感度', '查询好感度全局'})
     async def query_all_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """超级管理员专用：查看所有会话的好感度数据"""
         # 权限检查
@@ -874,48 +912,55 @@ class FavourManagerTool(Star):
         else:
             yield event.plain_result("❌ 清空失败")
 
-    @filter.command("查看好感度帮助")
+    @filter.command("查看好感度帮助",alias={'好感度帮助', '好感度插件帮助'})
     async def help_text(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """查看帮助文档"""
         current_mode = "全局模式（所有对话共享好感度）" if self.is_global_favour else "对话隔离模式（每个对话独立计算）"
         
-        help_text = f"""
-======好感度插件(权限分级版) v2.0======
+        is_admin = await self._check_permission(event, PermLevel.OWNER)
+
+        if is_admin:
+            help_text = f"""
+======⭐ 好感度插件 - 管理员帮助 ⭐======
 
 📌 当前模式：{current_mode}
 
 ⚙️ 权限等级说明
-- 普通用户：查看自己的好感度
-- 高等级成员：群等级达到阈值的成员（当前阈值：{self.perm_level_threshold}）
-- 群管理员：QQ群的管理员角色
-- 群主：QQ群的群主角色
-- Bot管理员：配置中的admins_id成员（最高权限，等同于代码1的管理员）
+- Bot管理员：配置中的admins_id，拥有最高权限。
+- 群主：QQ群的创建者。
+- 群管理员：QQ群的管理员角色。
+- 高等级成员：群等级达到阈值 {self.perm_level_threshold} 的成员。
+- 普通用户：普通群成员。
+▶ 权限继承关系：Bot管理员 ≥ 群主 ≥ 群管理员
 
-📌 权限继承关系：Bot管理员 ≥ 群主 ≥ 群管理员 ≥ 高等级成员 ≥ 普通用户
+📋 普通命令
+1. 查看我的好感度 - 查询自己的好感度信息。
 
-📋 命令列表
-1. 查看我的好感度 - 所有用户可用
-2. 修改好感度 <用户ID> <数值> - 群管理员及以上
-3. 删除好感度数据 <用户ID> - 群管理员及以上
-4. 查询好感度数据 - 群管理员及以上（查看当前会话）
-5. 查询全部好感度 - Bot管理员专用（查看所有会话）
-6. 清空当前好感度 - 群主及以上（清空当前会话）
-7. 清空全局好感度数据 - Bot管理员专用（清空所有数据）
-
-💡 权限说明
-- Bot管理员：拥有所有权限，跨平台、跨群聊生效
-- 群主/群管理员：仅在所在群聊内有效
-- Bot管理员在配置文件的admins_id中设置
-- 群管理员权限由QQ群角色决定
+🔑 管理员命令
+1. 修改好感度 <用户ID> <数值> - (群管理员及以上)
+2. 删除好感度数据 <用户ID> - (群管理员及以上)
+3. 查询好感度数据 - (群管理员及以上, 查看当前会话)
+4. 清空当前好感度 - (群主及以上, 清空当前会话)
+5. 查询全部好感度 - (Bot管理员, 查看所有会话)
+6. 清空全局好感度数据 - (Bot管理员, 清空所有数据)
 
 ⚠️ 注意事项
-- 权限不足时会提示错误信息
-- Bot管理员享受admin_default_favour初始好感度
-- 切换全局/对话模式前建议备份数据
-- 数据文件：./data/hao_gan_du/haogan.json
-- 清空操作支持自动备份（可在配置中开关）
+- 数据文件位于 ./data/hao_gan_du/ 目录。
+- 清空操作支持自动备份（可在配置中开关）。
 
-==================
+==================================
+"""
+        else:
+            help_text = f"""
+====== 好感度帮助 ======
+
+📋 可用命令
+1. 查看我的好感度 :查看当前好感度
+2. 查看好感度帮助 :显示此帮助信息
+
+请注意~查询到的数值仅供参考哦~
+
+==========================
 """
         yield event.plain_result(help_text)
     async def terminate(self) -> None:
