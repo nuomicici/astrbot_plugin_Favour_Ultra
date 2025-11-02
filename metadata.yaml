@@ -1,5 +1,5 @@
 name: "好感度/关系管理"
 author: "糯米茨"
-version: "v2.1"
+version: "v2.2"
 description: "更加完善的好感度判断插件，配合LLM和自定义Prompt进行使用，效果显著。该插件使用与现有好感度插件不同的判断、写入方法，以及扩展更多的自定义内容，允许更加自由地定义好感度规则。"
 repo: "https://github.com/nuomicici/astrbot_plugin_Favour_Ultra"
