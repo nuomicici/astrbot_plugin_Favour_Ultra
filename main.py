@@ -570,9 +570,8 @@ class FavourManagerTool(Star):
     @filter.on_llm_response()
     async def handle_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
         """
-        阶段一：解析LLM响应，将解析结果通过 message_id 存入 self.pending_updates。
+        阶段一：解析LLM响应，根据解析结果进行详细日志记录，并将结果通过 message_id 存入 self.pending_updates。
         """
-        # 检查 message_obj 和 message_id 是否存在
         if not hasattr(event, 'message_obj') or not hasattr(event.message_obj, 'message_id'):
             logger.warning("事件对象缺少 message_obj 或 message_id，无法处理好感度。")
             return
@@ -583,13 +582,20 @@ class FavourManagerTool(Star):
         try:
             update_data = {'favour_change': 0, 'relationship_update': None}
 
-            # 1. 解析好感度变化
+            # 1. 解析好感度变化并实现精细化日志
             favour_matches = self.favour_pattern.findall(original_text)
-            if favour_matches:
+            
+            if not favour_matches:
+                # Case 1: 完全没有匹配到标签
+                logger.error("无法从LLM响应中获取任何好感度标签，请检查你的人格配置中是否有配置好感度相关内容，如果有，请删除")
+                logger.warn("如果包含标签但没有被获取并出现错误，请前往gitgub提交issues，或添加QQ群3218444911")
+            else:
                 valid_changes = []
                 for match in favour_matches:
                     match_str = match.lower().strip()
                     temp_change = None
+                    
+                    # 尝试解析标签内容
                     if "降低" in match_str:
                         n_match = re.search(r'降低\s*[:：]?\s*(\d+)', match_str)
                         if n_match:
@@ -607,13 +613,19 @@ class FavourManagerTool(Star):
                     elif "持平" in match_str:
                         temp_change = 0
                     
+                    # 根据解析结果输出不同级别的日志
                     if temp_change is not None:
+                        # Case 2: 匹配到且成功解析
+                        logger.debug(f"有效标签: '{match}', 解析值: {temp_change}")
                         valid_changes.append(temp_change)
+                    else:
+                        # Case 3: 匹配到但无法解析
+                        logger.warn(f"获取到无效标签: '{match}'。请检查你的人格配置中是否有配置好感度相关内容，如果有，请删除")
 
                 if valid_changes:
                     update_data['favour_change'] = valid_changes[-1]
             
-            # 2. 解析关系变化
+            # 2. 解析关系变化 (逻辑不变)
             rel_matches = self.relationship_pattern.findall(original_text)
             if rel_matches:
                 rel_name, rel_bool = rel_matches[-1]
