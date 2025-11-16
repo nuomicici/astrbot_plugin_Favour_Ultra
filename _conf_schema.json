@@ -64,5 +64,23 @@
     "type": "int",
     "default": 50,
     "hint": "群成员等级达到此值时视为HIGH权限，具体用来干啥我还没确定"
-}
+},
+"cold_violence_threshold": {
+    "description": "冷暴力触发阈值",
+    "type": "int",
+    "hint": "当好感度小于等于此值，并再次下降时，将触发冷暴力模式。",
+    "default": -50
+  },
+  "cold_violence_duration_minutes": {
+    "description": "冷暴力持续时间（分钟）",
+    "type": "int",
+    "hint": "触发冷暴力后，机器人将在此时间内拒绝回应。",
+    "default": 60
+  },
+  "cold_violence_trigger_message": {
+    "description": "冷暴力触发自定义语句",
+    "type": "text",
+    "hint": "当用户好感度首次降至阈值以下、触发冷暴力模式时，在回复末尾附加的自定义语句。留空则不附加。",
+    "default": "......（我不想理你了。）"
+  }
 }
