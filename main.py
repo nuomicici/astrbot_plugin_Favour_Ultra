@@ -369,7 +369,11 @@ class FavourManagerTool(Star):
         "level_threshold": 50,
         "cold_violence_threshold": -50,
         "cold_violence_duration_minutes": 60,
-        "cold_violence_trigger_message": "......（我不想理你了。）"
+        "cold_violence_replies": {
+            "on_trigger": "......（我不想理你了。）",
+            "on_message": "[自动回复]不想理你,{time_str}后再找我",
+            "on_query": "冷暴力呢，看什么看，{time_str}之后再找我说话"
+        }
     }
 
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -388,7 +392,12 @@ class FavourManagerTool(Star):
         
         self.cold_violence_threshold = self.config.get("cold_violence_threshold", self.DEFAULT_CONFIG["cold_violence_threshold"])
         self.cold_violence_duration_minutes = self.config.get("cold_violence_duration_minutes", self.DEFAULT_CONFIG["cold_violence_duration_minutes"])
-        self.cold_violence_trigger_message = self.config.get("cold_violence_trigger_message", self.DEFAULT_CONFIG["cold_violence_trigger_message"])
+        default_replies = self.DEFAULT_CONFIG["cold_violence_replies"]
+        self.cold_violence_replies = self.config.get("cold_violence_replies", default_replies)
+
+        for key, value in default_replies.items():
+            if key not in self.cold_violence_replies:
+                self.cold_violence_replies[key] = value
         self._validate_config()
         
         self.admins_id = context.get_config().get("admins_id", [])
@@ -532,11 +541,11 @@ class FavourManagerTool(Star):
             if datetime.now() < expiration_time:
                 remaining_time = expiration_time - datetime.now()
                 time_str = self._format_timedelta(remaining_time)
-                response_text = f"[自动回复]不想理你,{time_str}后再找我"
-                
+                response_text = self.cold_violence_replies.get(
+                    "on_message", "[自动回复]不想理你,{time_str}后再找我"
+                ).format(time_str=time_str)                
                 logger.info(f"用户[{user_id}]处于冷暴力模式，已拦截LLM请求并回复: {response_text}")
                 
-                # 使用 event.send 发送消息
                 await event.send(event.plain_result(response_text))
                 event.stop_event()
                 return
@@ -736,9 +745,10 @@ class FavourManagerTool(Star):
                     duration = timedelta(minutes=self.cold_violence_duration_minutes)
                     self.cold_violence_users[user_id] = datetime.now() + duration
                     logger.warning(f"用户[{user_id}]好感度从 {old_favour} 降至 {new_favour} (变化: {change_n})，触发/重置冷暴力模式，持续{self.cold_violence_duration_minutes}分钟。")
-                    if self.cold_violence_trigger_message:
+                    trigger_message = self.cold_violence_replies.get("on_trigger")
+                    if trigger_message:
                         if result and result.chain:
-                            result.chain.append(Plain(f"\n{self.cold_violence_trigger_message}"))
+                            result.chain.append(Plain(f"\n{trigger_message}"))
                             logger.info(f"已为用户[{user_id}]的回复附加冷暴力触发语句。")
             new_chain = []
             cleaned = False
@@ -771,8 +781,9 @@ class FavourManagerTool(Star):
                 remaining_time = expiration_time - datetime.now()
                 time_str = self._format_timedelta(remaining_time)
                 
-                response = f"冷暴力呢，看什么看，{time_str}之后再找我说话"
-                
+                response = self.cold_violence_replies.get(
+                    "on_query", "冷暴力呢，看什么看，{time_str}之后再找我说话"
+                ).format(time_str=time_str)                
                 yield event.plain_result(response)
                 return
             else:
@@ -792,19 +803,43 @@ class FavourManagerTool(Star):
         group_nickname = await self._get_user_display_name(event, user_id)
 
         response = (
-            f"===好感度信息 ({mode_hint})===\n"
-            f"{group_nickname}（{user_id}）\n"
-            f"好感度：{current_favour}/100\n"
-            f"关系：{current_relationship}"
+            f"查询用户：{group_nickname} ({user_id})\n"
+            f"当前模式：{mode_hint}\n"
+            "──────────────\n"
+            f"当前好感度：{current_favour} / 100\n"
+            f"当前关系：{current_relationship}"
         )
         
-        yield event.plain_result(response)
+        try:
+            url = await self.text_to_image(f"# 好感度信息查询\n\n{response}")
+            yield event.image_result(url)
+        except Exception as e:
+            logger.error(f"为用户[{user_id}]生成好感度图片失败: {str(e)}")
+            yield event.plain_result(response)
 
+    @filter.command("取消冷暴力", alias={'解除冷暴力'})
+    async def cancel_cold_violence(self, event: AstrMessageEvent, target_uid: str) -> AsyncGenerator[Plain, None]:
+        """Bot管理员专用：手动取消用户的冷暴力状态"""
+        if not await self._check_permission(event, PermLevel.SUPERUSER):
+            yield event.plain_result("权限不足！此命令仅限Bot管理员使用。")
+            return
+
+        target_uid = target_uid.strip()
+        if not target_uid:
+            yield event.plain_result("请提供需要取消冷暴力的用户ID。")
+            return
+
+        if target_uid in self.cold_violence_users:
+            del self.cold_violence_users[target_uid]
+            logger.info(f"Bot管理员 [{event.get_sender_id()}] 已手动取消用户 [{target_uid}] 的冷暴力状态。")
+            yield event.plain_result(f"已取消用户 [{target_uid}] 的冷暴力状态。")
+        else:
+            yield event.plain_result(f"用户 [{target_uid}] 未处于冷暴力状态。")
     @filter.command("修改好感度")
     async def modify_favour(self, event: AstrMessageEvent, target_uid: str, value: str) -> AsyncGenerator[Plain, None]:
         """管理员及以上可用：修改指定用户好感度"""
         if not await self._check_permission(event, PermLevel.ADMIN):
-            yield event.plain_result("❌ 权限不足！需要管理员及以上权限")
+            yield event.plain_result("权限不足！需要管理员及以上权限")
             return
         
         session_id = self._get_session_id(event)
@@ -812,10 +847,10 @@ class FavourManagerTool(Star):
         try:
             favour_value = int(value.strip())
             if not (-100 <= favour_value <= 100):
-                yield event.plain_result("❌ 好感度值必须在-100~100之间")
+                yield event.plain_result("好感度值必须在-100~100之间")
                 return
         except ValueError:
-            yield event.plain_result("❌ 好感度值必须是整数")
+            yield event.plain_result("好感度值必须是整数")
             return
         
         success = await self.file_manager.update_user_favour(target_uid, session_id, favour=favour_value)
@@ -823,42 +858,42 @@ class FavourManagerTool(Star):
         if success:
             record = await self.file_manager.get_user_favour(target_uid, session_id)
             current_value = record["favour"] if record else "未知"
-            yield event.plain_result(f"✅ 已将用户[{target_uid}]的好感度设置为{favour_value}（当前值：{current_value}）")
+            yield event.plain_result(f"已将用户[{target_uid}]的好感度设置为{favour_value}（当前值：{current_value}）")
             logger.info(f"管理员[{event.get_sender_id()}]修改用户[{target_uid}]好感度为{favour_value}")
         else:
-            yield event.plain_result("❌ 修改失败")
+            yield event.plain_result("修改失败")
 
     @filter.command("删除好感度数据")
     async def delete_user_favour(self, event: AstrMessageEvent, userid: str) -> AsyncGenerator[Plain, None]:
         """管理员及以上可用：删除指定用户好感度数据"""
         if not await self._check_permission(event, PermLevel.ADMIN):
-            yield event.plain_result("❌ 权限不足！需要管理员及以上权限")
+            yield event.plain_result("权限不足！需要管理员及以上权限")
             return
         
         userid_str = userid.strip()
         if not userid_str:
-            yield event.plain_result("❌ 失败：用户ID不可为空")
+            yield event.plain_result("失败：用户ID不可为空")
             return
         
         session_id = self._get_session_id(event)
         success, msg = await self.file_manager.delete_user_favour(userid_str, session_id)
         
         if success:
-            yield event.plain_result(f"✅ {msg}")
+            yield event.plain_result(f"{msg}")
             logger.info(f"管理员[{event.get_sender_id()}]删除用户[{userid_str}]好感度数据成功")
         else:
-            yield event.plain_result(f"❌ {msg}")
+            yield event.plain_result(f"{msg}")
 
     @filter.command("查询好感度数据", alias={'查看好感度数据', '本群好感度查询', '查看本群好感度', '本群好感度'})
     async def query_favour_data(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """管理员及以上可用：查看当前会话所有好感度"""
         if not await self._check_permission(event, PermLevel.ADMIN):
-            yield event.plain_result("❌ 权限不足！需要管理员及以上权限")
+            yield event.plain_result("权限不足！需要管理员及以上权限")
             return
         
         group_id = event.get_group_id()
         if not group_id:
-            yield event.plain_result("❌ 此命令只能在群聊中使用。")
+            yield event.plain_result("此命令只能在群聊中使用。")
             return
 
         session_id = self._get_session_id(event)
@@ -907,7 +942,7 @@ class FavourManagerTool(Star):
     async def query_all_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """超级管理员专用：查看所有会话的好感度数据"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
-            yield event.plain_result("❌ 权限不足！需要超级管理员权限")
+            yield event.plain_result("权限不足！需要超级管理员权限")
             return
         
         data = await self.file_manager.read_favour()
@@ -976,17 +1011,17 @@ class FavourManagerTool(Star):
     async def clear_conversation_favour_prompt(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """群主专用：清空当前会话好感度（需二次确认）"""
         if not await self._check_permission(event, PermLevel.OWNER):
-            yield event.plain_result("❌ 权限不足！需要群主权限")
+            yield event.plain_result("权限不足！需要群主权限")
             return
         
         backup_hint = "（已开启自动备份）" if self.enable_clear_backup else "（⚠️已关闭自动备份，数据将无法恢复！）"
-        yield event.plain_result(f"❌ 请确认是否清空当前会话的好感度数据？{backup_hint}\n如果确认，请输入【清空当前好感度 确认】")
+        yield event.plain_result(f"请确认是否清空当前会话的好感度数据？{backup_hint}\n如果确认，请输入【清空当前好感度 确认】")
 
     @filter.command("清空当前好感度 确认")
     async def clear_conversation_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """群主专用：确认清空当前会话好感度"""
         if not await self._check_permission(event, PermLevel.OWNER):
-            yield event.plain_result("❌ 权限不足！需要群主权限")
+            yield event.plain_result("权限不足！需要群主权限")
             return
         
         session_id = self._get_session_id(event)
@@ -997,35 +1032,35 @@ class FavourManagerTool(Star):
             success = await self.file_manager.write_favour(new_data)
         
         if success:
-            yield event.plain_result(f"✅ 已清空当前会話的好感度数据")
+            yield event.plain_result(f"已清空当前会話的好感度数据")
             logger.info(f"群主[{event.get_sender_id()}]清空会话[{session_id}]好感度数据")
         else:
-            yield event.plain_result("❌ 清空失败")
+            yield event.plain_result("清空失败")
 
     @filter.command("清空全局好感度数据")
     async def clear_global_favour_prompt(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """超级管理员专用：清空所有好感度数据（需二次确认）"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
-            yield event.plain_result("❌ 权限不足！需要超级管理员权限")
+            yield event.plain_result("权限不足！需要超级管理员权限")
             return
         
         backup_hint = "（已开启自动备份）" if self.enable_clear_backup else "（⚠️已关闭自动备份，数据将无法恢复！）"
-        yield event.plain_result(f"❌ 请确认是否清空所有好感度数据？{backup_hint}\n如果确认，请输入【清空全局好感度数据 确认】")
+        yield event.plain_result(f"请确认是否清空所有好感度数据？{backup_hint}\n如果确认，请输入【清空全局好感度数据 确认】")
 
     @filter.command("清空全局好感度数据 确认")
     async def clear_global_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """超级管理员专用：确认清空所有好感度数据"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
-            yield event.plain_result("❌ 权限不足！需要超级管理员权限")
+            yield event.plain_result("权限不足！需要超级管理员权限")
             return
         
         success = await self.file_manager.clear_all_favour()
         
         if success:
-            yield event.plain_result("✅ 已清空全局好感度数据")
+            yield event.plain_result("已清空全局好感度数据")
             logger.info(f"超级管理员[{event.get_sender_id()}]清空全局好感度数据")
         else:
-            yield event.plain_result("❌ 清空失败")
+            yield event.plain_result("清空失败")
 
     @filter.command("查看好感度帮助",alias={'好感度帮助', '好感度插件帮助'})
     async def help_text(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
@@ -1058,6 +1093,7 @@ class FavourManagerTool(Star):
 4. 清空当前好感度 - (群主及以上, 清空当前会话)
 5. 查询全部好感度 - (Bot管理员, 查看所有会话)
 6. 清空全局好感度数据 - (Bot管理员, 清空所有数据)
+7. 取消冷暴力 <用户ID> - (Bot管理员, 解除用户冷暴力)
 
 ⚠️ 注意事项
 - 数据文件位于 ./data/hao_gan_du/ 目录。
