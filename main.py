@@ -2,6 +2,7 @@ import json
 import re
 import traceback
 import string
+import shutil
 from pathlib import Path
 from typing import Dict, List, AsyncGenerator, Optional, Tuple, Any  
 import asyncio
@@ -348,12 +349,6 @@ class FavourFileManager(AsyncJsonFileManager):
             return True, f"已删除用户[{userid_str}]（会话[{session_id or '全局'}]）的好感度数据"
 
 # ==================== 主插件类 ====================
-@register(
-    "astrbot_plugin_favour_ultra",
-    "糯米茨",
-    "好感度管理插件",
-    "v2.5"
-)
 class FavourManagerTool(Star):
     DEFAULT_CONFIG = {
         "default_favour": 0,
@@ -407,14 +402,46 @@ class FavourManagerTool(Star):
             superusers=self.admins_id,
             level_threshold=self.perm_level_threshold
         )
+        base_data_dir = Path(context.get_config().get("plugin.data_dir", "./data"))
+        old_data_dir = base_data_dir / "hao_gan_du"
+        self.data_dir = base_data_dir / "plugin_data" / "astrbot_plugin_favour_ultra"
         
-        self.data_dir = Path(context.get_config().get("plugin.data_dir", "./data")) / "hao_gan_du"
+        # 检查是否需要迁移
+        if old_data_dir.exists() and not self.data_dir.exists():
+            logger.warning(f"[好感度插件] 检测到旧版数据目录 {old_data_dir}，正在迁移至 {self.data_dir}...")
+            try:
+                # 确保新目录的父级存在
+                self.data_dir.parent.mkdir(parents=True, exist_ok=True)
+                # 复制旧数据到新目录
+                shutil.copytree(old_data_dir, self.data_dir)
+                logger.info("[好感度插件] 数据迁移成功。")
+                
+                trash_dir = base_data_dir / "hao_gan_du_应删除的目录"
+                if trash_dir.exists():
+                    shutil.rmtree(trash_dir) # 如果之前有残留，先清理
+                old_data_dir.rename(trash_dir)
+                logger.info(f"[好感度插件] 旧数据目录已重命名为: {trash_dir}，您可以随时删除它。")
+                
+            except Exception as e:
+                logger.error(f"[好感度插件] 数据迁移失败: {str(e)}")
+                logger.error("[好感度插件] 请手动将 data/hao_gan_du 下的数据移动到 data/plugin_data/astrbot_plugin_favour_ultra")
+                try:
+                    fail_dir = base_data_dir / "hao_gan_du_请手动迁移目录"
+                    if fail_dir.exists():
+                        shutil.rmtree(fail_dir)
+                    old_data_dir.rename(fail_dir)
+                except Exception as rename_err:
+                    logger.error(f"[好感度插件] 重命名旧目录失败: {rename_err}")
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
         self.file_manager = FavourFileManager(self.data_dir, self.enable_clear_backup)
         self.global_hao_gan_du = GlobalFavourFileManager(self.data_dir)
         
-        self.favour_pattern = re.compile(r'[\[［]\s*好感度.*?[\]］]', re.DOTALL | re.IGNORECASE)
+        self.favour_pattern = re.compile(
+            r'[\[［][^\[\]［］]*?(?:好.*?感|好.*?度|感.*?度)[^\[\]［］]*?[\]］]', 
+            re.DOTALL | re.IGNORECASE
+        )
         self.relationship_pattern = re.compile(r'[\[［]\s*用户申请确认关系\s*(.*?)\s*[:：]\s*(true|false)\s*[\]］]', re.IGNORECASE)
-        
         mode_text = "全局模式（所有对话共享好感度）" if self.is_global_favour else "对话隔离模式"
         logger.info(f"好感度插件(权限分级版)已初始化 - {mode_text}")
         self.pending_updates = {}
@@ -626,7 +653,7 @@ class FavourManagerTool(Star):
             cold_violence_threshold=self.cold_violence_threshold
         )
 
-        req.system_prompt = f"{prompt_final}\n\n{req.system_prompt}".strip()
+        req.system_prompt = f"{prompt_final}\n{req.system_prompt}".strip()
 
     @filter.on_llm_response()
     async def handle_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
@@ -639,41 +666,47 @@ class FavourManagerTool(Star):
             update_data = {'favour_change': 0, 'relationship_update': None}
             has_favour_tag = False
             favour_matches = self.favour_pattern.findall(original_text)
+            
             if not favour_matches:
-                logger.error("无法从LLM响应中获取任何好感度标签，请检查你的人格配置中是否有配置好感度相关内容，如果有，请删除")
-                logger.warn("如果包含标签但没有被获取并出现错误，请前往gitgub提交issues，或添加QQ群964447137")
+                # 仅在调试模式下输出，避免刷屏
+                logger.debug("未检测到好感度标签")
             else:
                 has_favour_tag = True
                 valid_changes = []
                 for match in favour_matches:
                     match_str = match.lower().strip()
                     temp_change = None
-                    if "持平" in match_str:
+                    
+                    # 1. 提取数字 (直接解析int)
+                    num_match = re.search(r'(\d+)', match_str)
+                    val = abs(int(num_match.group(1))) if num_match else 0
+                    
+                    # 2. 判断方向 (增加容错率)
+                    # 包含 "降" 或 "低" -> 下降
+                    if re.search(r'[降低]', match_str):
+                        # 应用配置的限制范围，防止数值过大
+                        temp_change = -max(self.favour_decrease_min, min(self.favour_decrease_max, val))
+                        
+                    # 包含 "上" 或 "升" -> 上升
+                    elif re.search(r'[上升]', match_str):
+                        # 应用配置的限制范围
+                        temp_change = max(self.favour_increase_min, min(self.favour_increase_max, val))
+                        
+                    # 包含 "持平" -> 0
+                    elif re.search(r'[持平]', match_str):
                         temp_change = 0
-                    elif "降低" in match_str:
-                        n_match = re.search(r'降低\s*[:：]?\s*(\d+)', match_str)
-                        if n_match:
-                            try:
-                                n = int(n_match.group(1).strip())
-                                temp_change = -max(self.favour_decrease_min, min(self.favour_decrease_max, n))
-                            except (ValueError, TypeError): pass
-                    elif "上升" in match_str:
-                        n_match = re.search(r'上升\s*[:：]?\s*(-?\d+)', match_str)
-                        if n_match:
-                            try:
-                                n = abs(int(n_match.group(1).strip()))
-                                temp_change = max(self.favour_increase_min, min(self.favour_increase_max, n))
-                            except (ValueError, TypeError): pass
+                    
+                    # 如果提取到了变化值
                     if temp_change is not None:
-                        if temp_change == 0 and "持平" in match_str:
-                            logger.debug(f"有效标签: '{match}', 无需解析")
-                        else:
-                            logger.debug(f"有效标签: '{match}', 解析值: {temp_change}")
+                        logger.debug(f"有效标签: '{match}', 解析值: {temp_change}")
                         valid_changes.append(temp_change)
                     else:
-                        logger.warn(f"获取到无效标签: '{match}'。请检查你的人格配置中是否有配置好感度相关内容，如果有，请删除")
+                        logger.warning(f"获取到标签但不包含方向关键词(上/升/降/低/持平): '{match}'")
+
                 if valid_changes:
+                    # 取最后一个有效变化
                     update_data['favour_change'] = valid_changes[-1]
+
             rel_matches = self.relationship_pattern.findall(original_text)
             if rel_matches:
                 rel_name, rel_bool = rel_matches[-1]
