@@ -16,12 +16,13 @@ from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api.event import filter
 
 # 导入拆分后的模块
-from .const import DEFAULT_CONFIG, EXCLUSIVE_RELATIONSHIPS, FAVOUR_PATTERN, RELATIONSHIP_PATTERN, PROMPT_TEMPLATE
+# [修改] 增加 RELATIONSHIP_ATTR_PATTERN 的导入，移除 EXCLUSIVE_RELATIONSHIPS
+from .const import DEFAULT_CONFIG, FAVOUR_PATTERN, RELATIONSHIP_PATTERN, RELATIONSHIP_ATTR_PATTERN, PROMPT_TEMPLATE
 from .utils import is_valid_userid, format_timedelta
 from .permission import PermLevel, PermissionManager
 from .storage import FavourFileManager, GlobalFavourFileManager
 
-@register("favour_ultra", "Soulter", "好感度/关系管理(重构版)", "1.2.1")
+@register("favour_ultra", "Soulter", "好感度/关系管理(重构版)", "1.2.2")
 class FavourManagerTool(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -89,7 +90,6 @@ class FavourManagerTool(Star):
     def _validate_config(self):
         if not (-100 <= self.default_favour <= 100):
             self.default_favour = DEFAULT_CONFIG["default_favour"]
-        # ... 其他简单的校验省略，保持代码整洁
 
     def _get_target_uid(self, event: AstrMessageEvent, text_arg: str) -> Optional[str]:
         """解析目标用户ID，支持@和纯数字，过滤机器人自己"""
@@ -101,7 +101,6 @@ class FavourManagerTool(Star):
             for component in event.message_obj.message:
                 if isinstance(component, At):
                     uid = str(component.qq)
-                    # 如果At的是机器人自己，则跳过
                     if bot_self_id and uid == bot_self_id:
                         continue
                     return uid
@@ -131,7 +130,6 @@ class FavourManagerTool(Star):
         except Exception:
             return target_user_id
 
-    # [补全] 判断是否为管理员的方法
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         return str(event.get_sender_id()) in self.admins_id
 
@@ -186,16 +184,19 @@ class FavourManagerTool(Star):
             curr_fav = await self._get_initial_favour(event)
             curr_rel = "无"
 
-        # 3. 唯一关系检查
+        # 3. 唯一关系检查 (重构：基于 is_unique 字段)
         exclusive_addon = ""
         if not self.is_global_favour and session_id:
             all_data = await self.file_manager.read_favour()
             session_data = [i for i in all_data if i["session_id"] == session_id]
             exists = []
             for item in session_data:
-                rel = item.get("relationship", "")
-                if rel and any(k in rel for k in EXCLUSIVE_RELATIONSHIPS):
-                    exists.append(f"{rel}{item['userid']}")
+                # [修改] 检查 is_unique 标志
+                if item.get("is_unique"):
+                    rel_name = item.get("relationship", "未知关系")
+                    rel_cat = item.get("unique_category", "唯一关系")
+                    exists.append(f"{rel_name}(类别:{rel_cat})用户:{item['userid']}")
+            
             if exists:
                 exclusive_addon = f"\n本群聊中已有唯一关系：{'，'.join(exists)}（如果有更多，用并列方式列出），任何想要成为类似关系的请求你都必须据此拒绝。"
 
@@ -223,9 +224,16 @@ class FavourManagerTool(Star):
         msg_id = str(event.message_obj.message_id)
         text = resp.completion_text
         
-        update_data = {'change': 0, 'rel_update': None}
+        # [修改] 初始化增加 unique 相关字段
+        update_data = {
+            'change': 0, 
+            'rel_update': None,
+            'is_unique': False,
+            'unique_category': None
+        }
         has_tag = False
         
+        # 1. 解析好感度
         matches = FAVOUR_PATTERN.findall(text)
         if matches:
             has_tag = True
@@ -249,13 +257,25 @@ class FavourManagerTool(Star):
             if valid_changes:
                 update_data['change'] = valid_changes[-1]
 
+        # 2. 解析关系确认
         rel_matches = RELATIONSHIP_PATTERN.findall(text)
         if rel_matches:
             name, boolean = rel_matches[-1]
             if boolean.lower() == "true" and name.strip():
                 update_data['rel_update'] = name.strip()
 
-        if has_tag or update_data['rel_update']:
+        # 3. [新增] 解析唯一性属性
+        # 格式: [关系属性:唯一:描述]
+        attr_matches = RELATIONSHIP_ATTR_PATTERN.findall(text)
+        if attr_matches:
+            # 只要出现了这个标签，就认为是唯一关系
+            category = attr_matches[-1].strip()
+            update_data['is_unique'] = True
+            update_data['unique_category'] = category
+            # 如果有了唯一标签，但没有检测到关系名更新(可能LLM分开了)，则不强制rel_update
+            # 但通常它们是一起出现的。
+
+        if has_tag or update_data['rel_update'] or update_data['is_unique']:
             self.pending_updates[msg_id] = update_data
 
     @filter.on_decorating_result(priority=100)
@@ -271,6 +291,9 @@ class FavourManagerTool(Star):
             if data:
                 change = data['change']
                 rel_up = data['rel_update']
+                is_uniq = data['is_unique']
+                uniq_cat = data['unique_category']
+                
                 uid = str(event.get_sender_id())
                 sid = self._get_session_id(event)
                 
@@ -286,12 +309,30 @@ class FavourManagerTool(Star):
                     old_rel = record.get("relationship", "") or ""
                     new_rel = rel_up if rel_up is not None else old_rel
                     
+                    # 关系破裂时清理唯一性
                     if new_fav < 0 and old_rel:
                         new_rel = ""
+                        is_uniq = False # 关系破裂，唯一性自然失效
+                        uniq_cat = None
                     
-                    if new_fav != old_fav or new_rel != old_rel:
-                        await self.file_manager.update_user_favour(uid, sid, new_fav, new_rel)
-                        logger.info(f"更新用户[{uid}]: {old_fav}->{new_fav}, Rel: {old_rel}->{new_rel}")
+                    # 检查是否有变更 (包括唯一性变更)
+                    old_is_uniq = record.get("is_unique", False)
+                    # 只有当 new_rel 有值且本次LLM指定了unique，或者本来就是unique，才更新
+                    # 如果本次没有指定 unique，但 rel 没有变，保持原状
+                    final_is_uniq = is_uniq if is_uniq else (old_is_uniq if new_rel == old_rel else False)
+                    final_uniq_cat = uniq_cat if uniq_cat else (record.get("unique_category") if new_rel == old_rel else None)
+
+                    if (new_fav != old_fav or new_rel != old_rel or 
+                        final_is_uniq != old_is_uniq or final_uniq_cat != record.get("unique_category")):
+                        
+                        await self.file_manager.update_user_favour(
+                            uid, sid, 
+                            favour=new_fav, 
+                            relationship=new_rel,
+                            is_unique=final_is_uniq,
+                            unique_category=final_uniq_cat
+                        )
+                        logger.info(f"更新用户[{uid}]: {old_fav}->{new_fav}, Rel: {old_rel}->{new_rel}, Unique: {final_is_uniq}")
 
                     if new_fav <= self.cold_violence_threshold and change < 0:
                         self.cold_violence_users[uid] = datetime.now() + timedelta(minutes=self.cold_violence_duration_minutes)
@@ -300,7 +341,7 @@ class FavourManagerTool(Star):
                             result.chain.append(Plain(f"\n{trig_msg}"))
 
                 except Exception as e:
-                    logger.error(f"更新异常: {e}")
+                    logger.error(f"更新异常: {e}\n{traceback.format_exc()}")
 
         # 2. 清洗逻辑
         new_chain = []
@@ -309,7 +350,10 @@ class FavourManagerTool(Star):
             if isinstance(comp, Plain) and comp.text:
                 orig = comp.text
                 new_t = FAVOUR_PATTERN.sub("", orig)
-                new_t = RELATIONSHIP_PATTERN.sub("", new_t).strip()
+                new_t = RELATIONSHIP_PATTERN.sub("", new_t)
+                # [新增] 清洗唯一性标签
+                new_t = RELATIONSHIP_ATTR_PATTERN.sub("", new_t).strip()
+                
                 if orig != new_t: cleaned = True
                 if new_t: new_chain.append(Plain(new_t))
             else:
@@ -323,7 +367,6 @@ class FavourManagerTool(Star):
     async def _respond_favour_info(self, event: AstrMessageEvent, target_uid: str):
         """共用的好感度响应生成器"""
         viewer_id = str(event.get_sender_id())
-        # 如果是查询者自己，检查冷暴力
         if viewer_id == target_uid and viewer_id in self.cold_violence_users:
             exp = self.cold_violence_users[viewer_id]
             if datetime.now() < exp:
@@ -338,9 +381,12 @@ class FavourManagerTool(Star):
         rec = await self.file_manager.get_user_favour(target_uid, sid)
         
         if rec:
-            fav, rel = rec["favour"], rec["relationship"] or "无"
+            fav = rec["favour"]
+            rel = rec["relationship"] or "无"
+            # [新增] 显示唯一性
+            if rec.get("is_unique"):
+                rel += f" (唯一: {rec.get('unique_category', '未分类')})"
         else:
-            # 查询他人且无记录时，尝试获取全局数据或默认值
             fav = self.default_favour
             if not self.is_global_favour:
                 gf = await self.global_hao_gan_du.get_user_global_favour(target_uid)
@@ -357,11 +403,11 @@ class FavourManagerTool(Star):
         except:
             yield event.plain_result(txt)
 
-    @filter.command("查看我的好感度", alias={'我的好感度'})
+    @filter.command("查看我的好感度", alias={'我的好感度', '好感度查询'})
     async def query_my_favour(self, event: AstrMessageEvent):
         async for x in self._respond_favour_info(event, str(event.get_sender_id())): yield x
 
-    @filter.command("查看他人好感度", alias={'查询他人好感度', 'ta的好感度', '查看用户好感度', '查询用户好感度','好感度查询','查看好感度','查询好感度','查好感度'})
+    @filter.command("查看他人好感度", alias={'查询他人好感度', 'ta的好感度', '查看用户好感度', '查询用户好感度', '查好感度'})
     async def query_other_favour(self, event: AstrMessageEvent, target: str):
         uid = self._get_target_uid(event, target)
         if not uid:
@@ -388,7 +434,6 @@ class FavourManagerTool(Star):
             return
             
         await self.file_manager.update_user_favour(uid, self._get_session_id(event), favour=v)
-        # 获取更新后的值以确认
         rec = await self.file_manager.get_user_favour(uid, self._get_session_id(event))
         curr = rec["favour"] if rec else "未知"
         yield event.plain_result(f"已将用户 {uid} 好感度修改为 {v} (当前: {curr})")
@@ -426,7 +471,6 @@ class FavourManagerTool(Star):
             yield event.plain_result("当前会话暂无数据")
             return
 
-        # 批量获取信息逻辑保持一致
         async def get_info(u_id: str):
             try:
                 info = await event.bot.get_group_member_info(group_id=int(group_id), user_id=int(u_id), no_cache=True)
@@ -437,10 +481,12 @@ class FavourManagerTool(Star):
         tasks = [get_info(item['userid']) for item in session_data]
         infos = await asyncio.gather(*tasks)
 
-        lines = [f"# 当前会话好感度数据 (会话: {sid or '全局'})\n\n| 群昵称 | 用户 (ID) | 好感度 | 关系 |\n|----|----|----|----|"]
+        lines = [f"# 当前会话好感度数据 (会话: {sid or '全局'})\n\n| 群昵称 | 用户 (ID) | 好感度 | 关系 | 唯一 |\n|----|----|----|----|----|"]
         for i, item in enumerate(session_data):
             gnic, pnic = infos[i]
-            lines.append(f"| {gnic} | {pnic} ({item['userid']}) | {item['favour']} | {item['relationship'] or '无'} |")
+            # [修改] 增加唯一性标识显示
+            uniq_str = "是" if item.get("is_unique") else ""
+            lines.append(f"| {gnic} | {pnic} ({item['userid']}) | {item['favour']} | {item['relationship'] or '无'} | {uniq_str} |")
         
         lines.append(f"\n总计：{len(session_data)}条")
         txt = "\n".join(lines)
@@ -461,7 +507,6 @@ class FavourManagerTool(Star):
             yield event.plain_result("数据为空")
             return
             
-        # 按会话分组
         groups = {}
         for item in data:
             sid = item["session_id"] or "全局"
@@ -492,9 +537,10 @@ class FavourManagerTool(Star):
             tasks = [get_info(item['userid']) for item in items]
             infos = await asyncio.gather(*tasks)
             
-            lines.append(f"\n# 会话：{sid}\n| 昵称 | 用户ID | 好感度 | 关系 |\n|---|---|---|---|")
+            lines.append(f"\n# 会话：{sid}\n| 昵称 | 用户ID | 好感度 | 关系 | 唯一 |\n|---|---|---|---|---|")
             for i, item in enumerate(items):
-                lines.append(f"| {infos[i]} | {item['userid']} | {item['favour']} | {item['relationship'] or '无'} |")
+                uniq_str = "Yes" if item.get("is_unique") else ""
+                lines.append(f"| {infos[i]} | {item['userid']} | {item['favour']} | {item['relationship'] or '无'} | {uniq_str} |")
                 
         txt = "\n".join(lines)
         try:
