@@ -21,7 +21,7 @@ DEFAULT_CONFIG = {
         "on_query": "冷暴力呢，看什么看，{time_str}之后再找我说话"
     }
 }
-
+ 
 # 唯一关系集合
 EXCLUSIVE_RELATIONSHIPS = {
     "妻", "夫", "配偶", "老婆", "老公", "妻子", "丈夫", 
