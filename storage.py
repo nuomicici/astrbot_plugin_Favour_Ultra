@@ -88,11 +88,14 @@ class FavourFileManager(AsyncJsonFileManager):
         for item in raw_data:
             if not isinstance(item, dict):
                 continue
+            # [修改] 读取时增加新的唯一性字段，提供默认值
             valid_item = {
                 "userid": str(item.get("userid", "")),
                 "favour": int(item.get("favour", 0)) if isinstance(item.get("favour"), (int, float)) else 0,
                 "session_id": str(item.get("session_id")) if item.get("session_id") else None,
-                "relationship": str(item.get("relationship", ""))
+                "relationship": str(item.get("relationship", "")),
+                "is_unique": bool(item.get("is_unique", False)),
+                "unique_category": str(item.get("unique_category", "")) if item.get("unique_category") else None
             }
             valid_data.append(valid_item)
         return valid_data
@@ -123,10 +126,16 @@ class FavourFileManager(AsyncJsonFileManager):
                 return item.copy()
         return None
 
-    async def update_user_favour(self, userid: str, session_id: Optional[str], favour: Optional[int] = None, relationship: Optional[str] = None) -> bool:
+    # [修改] 增加 is_unique 和 unique_category 参数
+    async def update_user_favour(self, userid: str, session_id: Optional[str], 
+                               favour: Optional[int] = None, 
+                               relationship: Optional[str] = None,
+                               is_unique: Optional[bool] = None,
+                               unique_category: Optional[str] = None) -> bool:
         userid_str = userid.strip()
         if not is_valid_userid(userid_str):
             return False
+        
         async with self.lock:
             data = await self.read_favour()
             found = False
@@ -136,17 +145,28 @@ class FavourFileManager(AsyncJsonFileManager):
                         item["favour"] = max(-100, min(100, favour))
                     if relationship is not None:
                         item["relationship"] = relationship
+                    # [新增] 更新唯一性标志
+                    if is_unique is not None:
+                        item["is_unique"] = is_unique
+                    if unique_category is not None:
+                        item["unique_category"] = unique_category
                     found = True
                     break
+            
             if not found:
                 init_favour = max(-100, min(100, favour)) if favour is not None else 0
                 init_relation = relationship or ""
-                data.append({
+                # [新增] 初始化唯一性标志
+                item_data = {
                     "userid": userid_str,
                     "session_id": session_id,
                     "favour": init_favour,
-                    "relationship": init_relation
-                })
+                    "relationship": init_relation,
+                    "is_unique": is_unique if is_unique is not None else False,
+                    "unique_category": unique_category
+                }
+                data.append(item_data)
+                
             return await self.write_favour(data)
 
     async def delete_user_favour(self, userid: str, session_id: Optional[str] = None) -> Tuple[bool, str]:
