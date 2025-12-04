@@ -21,7 +21,7 @@ from .utils import is_valid_userid, format_timedelta
 from .permission import PermLevel, PermissionManager
 from .storage import FavourFileManager, GlobalFavourFileManager
 
-@register("favour_ultra", "Soulter", "好感度/关系管理(重构版)", "1.2.0")
+@register("favour_ultra", "Soulter", "好感度/关系管理(重构版)", "1.2.1")
 class FavourManagerTool(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -131,8 +131,12 @@ class FavourManagerTool(Star):
         except Exception:
             return target_user_id
 
+    # [补全] 判断是否为管理员的方法
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        return str(event.get_sender_id()) in self.admins_id
+
     async def _check_permission(self, event: AstrMessageEvent, required_level: int) -> bool:
-        if str(event.get_sender_id()) in self.admins_id:
+        if self._is_admin(event):
             return True
         if not isinstance(event, AiocqhttpMessageEvent):
             return False
@@ -357,7 +361,7 @@ class FavourManagerTool(Star):
     async def query_my_favour(self, event: AstrMessageEvent):
         async for x in self._respond_favour_info(event, str(event.get_sender_id())): yield x
 
-    @filter.command("查看他人好感度", alias={'查询他人好感度', 'ta的好感度', '查看用户好感度', '查询用户好感度', '好感度查询','查看好感度','查询好感度','查好感度'})
+    @filter.command("查看他人好感度", alias={'查询他人好感度', 'ta的好感度', '查看用户好感度', '查询用户好感度','好感度查询','查看好感度','查询好感度','查好感度'})
     async def query_other_favour(self, event: AstrMessageEvent, target: str):
         uid = self._get_target_uid(event, target)
         if not uid:
@@ -426,7 +430,7 @@ class FavourManagerTool(Star):
         async def get_info(u_id: str):
             try:
                 info = await event.bot.get_group_member_info(group_id=int(group_id), user_id=int(u_id), no_cache=True)
-                return info.get("card", "") or info.get("nickname", ""), info.get("nickname", u_id)
+                return info.get("card", "") or info.get("nickname", u_id), info.get("nickname", u_id)
             except:
                 return "未知/退群", "未知"
 
