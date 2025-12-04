@@ -353,7 +353,7 @@ class FavourManagerTool(Star):
         except:
             yield event.plain_result(txt)
 
-    @filter.command("查看我的好感度", alias={'我的好感度', '好感度查询','查看好感度','查询好感度','查好感度'})
+    @filter.command("查看我的好感度", alias={'我的好感度'})
     async def query_my_favour(self, event: AstrMessageEvent):
         async for x in self._respond_favour_info(event, str(event.get_sender_id())): yield x
 
