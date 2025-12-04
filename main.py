@@ -721,92 +721,100 @@ class FavourManagerTool(Star):
             if event.is_stopped():
                 event.continue_event()
 
-    @filter.on_decorating_result()
+    @filter.on_decorating_result(priority=100)
     async def cleanup_and_update_favour(self, event: AstrMessageEvent) -> None:
         result = event.get_result()
         if not result or not result.chain:
             return
-        if not hasattr(event, 'message_obj') or not hasattr(event.message_obj, 'message_id'):
-            return
-        message_id = str(event.message_obj.message_id)
-        update_data = self.pending_updates.pop(message_id, None)
-        if not update_data:
-            return
-        change_n = update_data.get('favour_change', 0)
-        relationship_update = update_data.get('relationship_update')
-        user_id = str(event.get_sender_id())
-        session_id = self._get_session_id(event)
+        
+        # 1. 先尝试处理好感度数据更新 (只有解析到了才会执行)
+        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'message_id'):
+            message_id = str(event.message_obj.message_id)
+            update_data = self.pending_updates.pop(message_id, None)
+            
+            if update_data:
+                change_n = update_data.get('favour_change', 0)
+                relationship_update = update_data.get('relationship_update')
+                user_id = str(event.get_sender_id())
+                session_id = self._get_session_id(event)
+                try:
+                    old_favour = 0
+                    new_favour = 0
+                    if change_n == 0 and relationship_update is None:
+                        logger.info(f"用户[{user_id}]数据无更新")
+                    else:
+                        current_record = await self.file_manager.get_user_favour(user_id, session_id)
+                        if current_record:
+                            old_favour = current_record["favour"]
+                            new_favour = max(-100, min(100, old_favour + change_n))
+                            old_relationship = current_record.get("relationship", "") or ""
+                            final_relationship = old_relationship
+                            if relationship_update is not None:
+                                final_relationship = relationship_update
+                            if new_favour < 0 and old_relationship:
+                                final_relationship = ""
+                            favour_changed = (new_favour != old_favour)
+                            relationship_changed = (final_relationship != old_relationship)
+                            if favour_changed or relationship_changed:
+                                logger.info(
+                                    f"用户[{user_id}]数据更新 (会话: {session_id}):\n"
+                                    f"  ├─ 好感度: {old_favour} → {new_favour} (变化: {change_n})\n"
+                                    f"  └─ 关系: '{old_relationship}' → '{final_relationship}'"
+                                )
+                                await self.file_manager.update_user_favour(
+                                    userid=user_id,
+                                    session_id=session_id,
+                                    favour=new_favour if favour_changed else None,
+                                    relationship=final_relationship if relationship_changed else None
+                                )
+                        else:
+                            initial_favour = await self._get_initial_favour(event)
+                            old_favour = initial_favour
+                            new_favour = max(-100, min(100, initial_favour + change_n))
+                            final_relationship = relationship_update or ""
+                            if new_favour < 0 and final_relationship:
+                                final_relationship = ""
+                            logger.info(f"新用户[{user_id}]注册 (会话: {session_id}), 好感度: {new_favour}, 关系: '{final_relationship}'")
+                            await self.file_manager.update_user_favour(
+                                userid=user_id,
+                                session_id=session_id,
+                                favour=new_favour,
+                                relationship=final_relationship
+                            )
+                        if new_favour <= self.cold_violence_threshold and change_n < 0:
+                            duration = timedelta(minutes=self.cold_violence_duration_minutes)
+                            self.cold_violence_users[user_id] = datetime.now() + duration
+                            logger.warning(f"用户[{user_id}]好感度从 {old_favour} 降至 {new_favour} (变化: {change_n})，触发/重置冷暴力模式，持续{self.cold_violence_duration_minutes}分钟。")
+                            trigger_message = self.cold_violence_replies.get("on_trigger")
+                            if trigger_message:
+                                if result and result.chain:
+                                    result.chain.append(Plain(f"\n{trigger_message}"))
+                                    logger.info(f"已为用户[{user_id}]的回复附加冷暴力触发语句。")
+                except Exception as e:
+                    logger.error(f"更新好感度时发生异常: {str(e)}\n{traceback.format_exc()}")
+
+        # 2. 无论是否更新好感度，都执行消息清洗 (防止标签泄露)
         try:
-            old_favour = 0
-            new_favour = 0
-            if change_n == 0 and relationship_update is None:
-                logger.info(f"用户[{user_id}]数据无更新")
-            else:
-                current_record = await self.file_manager.get_user_favour(user_id, session_id)
-                if current_record:
-                    old_favour = current_record["favour"]
-                    new_favour = max(-100, min(100, old_favour + change_n))
-                    old_relationship = current_record.get("relationship", "") or ""
-                    final_relationship = old_relationship
-                    if relationship_update is not None:
-                        final_relationship = relationship_update
-                    if new_favour < 0 and old_relationship:
-                        final_relationship = ""
-                    favour_changed = (new_favour != old_favour)
-                    relationship_changed = (final_relationship != old_relationship)
-                    if favour_changed or relationship_changed:
-                        logger.info(
-                            f"用户[{user_id}]数据更新 (会话: {session_id}):\n"
-                            f"  ├─ 好感度: {old_favour} → {new_favour} (变化: {change_n})\n"
-                            f"  └─ 关系: '{old_relationship}' → '{final_relationship}'"
-                        )
-                        await self.file_manager.update_user_favour(
-                            userid=user_id,
-                            session_id=session_id,
-                            favour=new_favour if favour_changed else None,
-                            relationship=final_relationship if relationship_changed else None
-                        )
-                else:
-                    initial_favour = await self._get_initial_favour(event)
-                    old_favour = initial_favour
-                    new_favour = max(-100, min(100, initial_favour + change_n))
-                    final_relationship = relationship_update or ""
-                    if new_favour < 0 and final_relationship:
-                        final_relationship = ""
-                    logger.info(f"新用户[{user_id}]注册 (会话: {session_id}), 好感度: {new_favour}, 关系: '{final_relationship}'")
-                    await self.file_manager.update_user_favour(
-                        userid=user_id,
-                        session_id=session_id,
-                        favour=new_favour,
-                        relationship=final_relationship
-                    )
-                if new_favour <= self.cold_violence_threshold and change_n < 0:
-                    duration = timedelta(minutes=self.cold_violence_duration_minutes)
-                    self.cold_violence_users[user_id] = datetime.now() + duration
-                    logger.warning(f"用户[{user_id}]好感度从 {old_favour} 降至 {new_favour} (变化: {change_n})，触发/重置冷暴力模式，持续{self.cold_violence_duration_minutes}分钟。")
-                    trigger_message = self.cold_violence_replies.get("on_trigger")
-                    if trigger_message:
-                        if result and result.chain:
-                            result.chain.append(Plain(f"\n{trigger_message}"))
-                            logger.info(f"已为用户[{user_id}]的回复附加冷暴力触发语句。")
             new_chain = []
             cleaned = False
             for comp in result.chain:
-                if isinstance(comp, Plain):
+                if isinstance(comp, Plain) and comp.text:
                     original_text = comp.text
                     cleaned_text = self.favour_pattern.sub("", original_text)
                     cleaned_text = self.relationship_pattern.sub("", cleaned_text).strip()
                     if original_text != cleaned_text:
                         cleaned = True
+                    # 即使清洗后为空字符串，保留 Plain("") 也无大碍，或者可以选择只在 cleaned_text 非空时添加
                     if cleaned_text:
                         new_chain.append(Plain(text=cleaned_text))
                 else:
                     new_chain.append(comp)
+            
             if cleaned:
-                logger.info(f"消息发送前清理标签完成。")
+                logger.info(f"消息发送前清理标签完成(强制清洗)。")
                 result.chain = new_chain
         except Exception as e:
-            logger.error(f"更新好感度或清理标签时发生异常: {str(e)}\n{traceback.format_exc()}")
+            logger.error(f"清理标签时发生异常: {str(e)}\n{traceback.format_exc()}")
             
 
     # ==================== 命令系统 ====================
