@@ -198,7 +198,7 @@ class FavourManagerTool(Star):
                     exists.append(f"{rel_name}(类别:{rel_cat})用户:{item['userid']}")
             
             if exists:
-                exclusive_addon = f"\n本群聊中已有唯一关系：{'，'.join(exists)}（如果有更多，用并列方式列出），任何想要成为类似关系的请求你都必须据此拒绝。"
+                exclusive_addon = f"\n本群聊中已有唯一关系：{'，'.join(exists)}，任何想要成为类似关系的请求你都必须据此拒绝。"
 
         # 4. 构造 Prompt
         prompt = PROMPT_TEMPLATE.format(
