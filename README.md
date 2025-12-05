@@ -217,9 +217,9 @@ A4：因为冷暴力状态是**全局生效**的，且为了计时准确，它�
 - [ ] 待定，欢迎补充~
 
 # 联系
-**作者**: 糯米茨  
-**联系方式**: （许愿通道）
-- [GitHub Issues](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues)  
-- [QQ](https://qm.qq.com/q/wMGXYfKKoS)
+| 作者信息 | 交流/反馈 |
+| :--- | :--- |
+| **作者**: 糯米茨<br>**联系方式**: （许愿通道）<br>- [GitHub Issues](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues)<br>- [QQ](https://qm.qq.com/q/wMGXYfKKoS) | <img src="/QC.jpg" width="240px"> |
+
 ## 求你们了
 来~~鞭策~~支持一下叭！
