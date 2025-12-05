@@ -2,12 +2,14 @@
   "min_favour_value": {
     "description": "好感度数值下限（例如 -100）",
     "type": "int",
-    "default": -100
+    "default": -100,
+    "hint": "修改后记得把好感度规则也改一下！"
   },
   "max_favour_value": {
     "description": "好感度数值上限（例如 100）",
     "type": "int",
-    "default": 100
+    "default": 100,
+    "hint": "修改后记得把好感度规则也改一下！"
   },
   "is_global_favour": {
     "description": "是否使用全局好感度模式",
