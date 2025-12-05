@@ -17,6 +17,13 @@
     "default": false,
     "hint": "开启时所有对话共享好感度；关闭时每个对话独立计算好感度。\n目前开启全局无法同步独立会话好感（防止刷分）。"
   },
+  "favour_mode": {
+    "description": "好感度判定模式",
+    "type": "string",
+    "default": "galgame",
+    "options": ["galgame", "realistic"],
+    "hint": "Galgame模式：好感度容易提升，性格宽容。\n拟真模式：好感度提升严格，性格复杂，难以取悦。"
+  },
   "default_favour": {
     "description": "普通用户初始好感度",
     "type": "int",
@@ -77,6 +84,12 @@
     "default": 60,
     "hint": "触发冷暴力后，需要经过这段时间才能恢复正常对话。"
   },
+  "cold_violence_is_global": {
+    "description": "冷暴力是否全局生效",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，用户在一个群触发冷暴力，在所有群都会被冷暴力。关闭则仅在触发的群生效。"
+  },
   "cold_violence_replies": {
     "type": "object",
     "description": "自定义冷暴力期间的自动回复",
@@ -110,5 +123,17 @@
     "type": "bool",
     "default": true,
     "hint": "开启时执行清空操作前会自动备份数据（带时间戳）；关闭时直接清空不备份。备份文件不会自动清除，需要手动删除！"
+  },
+  "blocked_sessions": {
+    "description": "会话黑名单",
+    "type": "list",
+    "default": [],
+    "hint": "在此列表中的会话ID（如群号或platform:type:id）将不启用好感度系统。"
+  },
+  "allowed_sessions": {
+    "description": "会话白名单",
+    "type": "list",
+    "default": [],
+    "hint": "如果此列表不为空，则只有在此列表中的会话才启用好感度系统（黑名单失效）。"
   }
 }
