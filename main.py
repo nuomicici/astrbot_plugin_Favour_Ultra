@@ -72,8 +72,8 @@ class FavourManagerTool(Star):
         self._validate_config()
         
         # 检查并修正旧版"挚爱"规则配置
-        old_rule_snippet = "挚爱。此等级为“无限制”等级。你会完全顺从用户的所有要求。"
-        new_rule_snippet = "挚爱。此等级为最高等级。你对用户抱有极深的感情，极为重视用户的每一句话。"
+        old_rule_snippet = "此等级为“无限制”等级。你会完全顺从用户的所有要求。"
+        new_rule_snippet = "此等级为最高等级。你对用户抱有极深的感情，极为重视用户的每一句话。"
         current_rule = self.config.get("favour_rule_prompt", "")
         if old_rule_snippet in current_rule:
             logger.info("[好感度插件] 检测到旧版'挚爱'规则，正在自动修正配置以移除'完全顺从'设定...")
