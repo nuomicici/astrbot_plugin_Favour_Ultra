@@ -19,12 +19,15 @@ class AsyncJsonFileManager:
     async def _read_json(self) -> Any:
         """读取JSON文件"""
         try:
+            logger.debug(f"正在读取文件: {self.data_path}")
             if not await aio_path.exists(self.data_path):
                 logger.debug(f"{self.data_path.name}不存在，返回默认值")
                 return self._get_default_value()
             
             async with aio_open(self.data_path, "r", encoding="utf-8") as f:
-                return json.loads(await f.read())
+                content = await f.read()
+                logger.debug(f"文件 {self.data_path.name} 读取成功，大小: {len(content)} bytes")
+                return json.loads(content)
         except Exception as e:
             logger.error(f"读取{self.data_path.name}失败: {str(e)}")
             return self._get_default_value()
@@ -32,8 +35,10 @@ class AsyncJsonFileManager:
     async def _write_json(self, data: Any) -> bool:
         """写入JSON文件"""
         try:
+            logger.debug(f"正在写入文件: {self.data_path}")
             async with aio_open(self.data_path, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+            logger.debug(f"文件 {self.data_path.name} 写入成功")
             return True
         except Exception as e:
             logger.error(f"写入{self.data_path.name}失败: {str(e)}")
@@ -76,13 +81,15 @@ class GlobalFavourFileManager(AsyncJsonFileManager):
         
         success = await self._write_json(data)
         if success:
-            logger.info(f"写入global_favour.json成功，包含{len(data)}个用户数据")
+            logger.debug(f"写入global_favour.json成功，包含{len(data)}个用户数据")
         return success
 
     async def get_user_global_favour(self, userid: str) -> Optional[int]:
         """获取用户全局好感度"""
         global_data = await self.read_global_favour()
-        return global_data.get(str(userid))
+        val = global_data.get(str(userid))
+        logger.debug(f"获取用户[{userid}]全局好感度: {val}")
+        return val
 
     async def update_global_favour(self, userid: str, favour: int) -> bool:
         """更新用户全局好感度"""
@@ -93,7 +100,9 @@ class GlobalFavourFileManager(AsyncJsonFileManager):
         async with self.lock:
             data = await self.read_global_favour()
             userid_str = str(userid)
-            data[userid_str] = max(self.min_val, min(self.max_val, favour))
+            new_val = max(self.min_val, min(self.max_val, favour))
+            data[userid_str] = new_val
+            logger.debug(f"更新用户[{userid}]全局好感度为: {new_val}")
             return await self.write_global_favour(data)
 
 class FavourFileManager(AsyncJsonFileManager):
@@ -127,7 +136,7 @@ class FavourFileManager(AsyncJsonFileManager):
             }
             valid_data.append(valid_item)
         
-        logger.info(f"读取haogan.json成功，一共{len(valid_data)}条记录")
+        logger.debug(f"读取haogan.json成功，一共{len(valid_data)}条记录")
         return valid_data
 
     async def write_favour(self, data: List[Dict[str, Any]]) -> bool:
@@ -138,7 +147,7 @@ class FavourFileManager(AsyncJsonFileManager):
         
         success = await self._write_json(data)
         if success:
-            logger.info(f"修改haogan.json成功，写入{len(data)}条记录")
+            logger.debug(f"修改haogan.json成功，写入{len(data)}条记录")
         return success
 
     async def clear_all_favour(self) -> bool:
@@ -169,7 +178,7 @@ class FavourFileManager(AsyncJsonFileManager):
         data = await self.read_favour()
         for item in data:
             if item["userid"] == userid_str and item["session_id"] == session_id:
-                logger.debug(f"查询到用户[{userid_str}]（会话[{session_id}]）的好感度记录")
+                logger.debug(f"查询到用户[{userid_str}]（会话[{session_id}]）的好感度记录: {item['favour']}")
                 return item.copy()
         
         logger.debug(f"未查询到用户[{userid_str}]（会话[{session_id}]）的好感度记录")
@@ -195,6 +204,7 @@ class FavourFileManager(AsyncJsonFileManager):
                     if is_unique is not None:
                         item["is_unique"] = is_unique
                     found = True
+                    logger.debug(f"更新现有记录: User[{userid_str}] Session[{session_id}] -> Favour[{item.get('favour')}] Rel[{item.get('relationship')}]")
                     break
             
             if not found:
@@ -208,6 +218,7 @@ class FavourFileManager(AsyncJsonFileManager):
                     "relationship": init_relation,
                     "is_unique": init_unique
                 })
+                logger.debug(f"创建新记录: User[{userid_str}] Session[{session_id}] -> Favour[{init_favour}]")
             
             return await self.write_favour(data)
 
@@ -222,10 +233,12 @@ class FavourFileManager(AsyncJsonFileManager):
             new_data = [item for item in data if not (item["userid"] == userid_str and item["session_id"] == session_id)]
             
             if len(new_data) == len(data):
+                logger.debug(f"尝试删除不存在的记录: User[{userid_str}] Session[{session_id}]")
                 return False, f"未查询到用户[{userid_str}]（会话[{session_id or '全局'}]）的好感度数据"
             
             success = await self.write_favour(new_data)
             if not success:
                 return False, "无法修改文件（详见日志）"
             
+            logger.info(f"已删除用户[{userid_str}]（会话[{session_id or '全局'}]）的好感度数据")
             return True, f"已删除用户[{userid_str}]（会话[{session_id or '全局'}]）的好感度数据"
