@@ -8,6 +8,15 @@
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#11-未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
+<div align="left" style="width:70%">
+
+12月5日 更新概要：  
+* 查询图片输出失败转文本输出（[增自定义模板一块](/自定义t2i模板.html)）  
+* 关系判定强化、@识别用户  
+* 好感度上下限添加自定义配置项
+
+</div>
+
 </div>
 
 ## 1. 插件概述
