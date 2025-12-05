@@ -7,8 +7,11 @@ from datetime import datetime, timedelta
 from typing import Dict, AsyncGenerator, Optional, List
 
 from astrbot.api import logger
-from astrbot.core.message.components import Plain, At
-from astrbot.core.platform.astr_message_event import AstrMessageEvent
+# [修改] 从 API 导入消息组件，而非 core
+from astrbot.api.message_components import Plain, At
+# [修改] 从 API 导入事件对象，而非 core
+from astrbot.api.event import AstrMessageEvent
+# [保留] AiocqhttpMessageEvent 属于特定平台实现，文档示例中允许从 sources 导入
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from astrbot.api.star import Star, register, Context
 from astrbot.api import AstrBotConfig
@@ -16,7 +19,6 @@ from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api.event import filter
 
 # 导入拆分后的模块
-# [修改] 增加 RELATIONSHIP_ATTR_PATTERN 的导入，移除 EXCLUSIVE_RELATIONSHIPS
 from .const import DEFAULT_CONFIG, FAVOUR_PATTERN, RELATIONSHIP_PATTERN, RELATIONSHIP_ATTR_PATTERN, PROMPT_TEMPLATE
 from .utils import is_valid_userid, format_timedelta
 from .permission import PermLevel, PermissionManager
@@ -115,6 +117,8 @@ class FavourManagerTool(Star):
         target_user_id = user_id or str(event.get_sender_id())
         group_id = event.get_group_id()
         
+        # 注意：以下 API 调用依赖于具体的平台适配器（如 OneBot），
+        # 如果切换到 GeWeChat 等其他平台，这里的 API 可能不同或不可用。
         if group_id:
             try:
                 info = await event.bot.get_group_member_info(
@@ -184,14 +188,13 @@ class FavourManagerTool(Star):
             curr_fav = await self._get_initial_favour(event)
             curr_rel = "无"
 
-        # 3. 唯一关系检查 (重构：基于 is_unique 字段)
+        # 3. 唯一关系检查
         exclusive_addon = ""
         if not self.is_global_favour and session_id:
             all_data = await self.file_manager.read_favour()
             session_data = [i for i in all_data if i["session_id"] == session_id]
             exists = []
             for item in session_data:
-                # [修改] 检查 is_unique 标志
                 if item.get("is_unique"):
                     rel_name = item.get("relationship", "未知关系")
                     rel_cat = item.get("unique_category", "唯一关系")
@@ -224,7 +227,6 @@ class FavourManagerTool(Star):
         msg_id = str(event.message_obj.message_id)
         text = resp.completion_text
         
-        # [修改] 初始化增加 unique 相关字段
         update_data = {
             'change': 0, 
             'rel_update': None,
@@ -264,16 +266,12 @@ class FavourManagerTool(Star):
             if boolean.lower() == "true" and name.strip():
                 update_data['rel_update'] = name.strip()
 
-        # 3. [新增] 解析唯一性属性
-        # 格式: [关系属性:唯一:描述]
+        # 3. 解析唯一性属性
         attr_matches = RELATIONSHIP_ATTR_PATTERN.findall(text)
         if attr_matches:
-            # 只要出现了这个标签，就认为是唯一关系
             category = attr_matches[-1].strip()
             update_data['is_unique'] = True
             update_data['unique_category'] = category
-            # 如果有了唯一标签，但没有检测到关系名更新(可能LLM分开了)，则不强制rel_update
-            # 但通常它们是一起出现的。
 
         if has_tag or update_data['rel_update'] or update_data['is_unique']:
             self.pending_updates[msg_id] = update_data
@@ -312,13 +310,11 @@ class FavourManagerTool(Star):
                     # 关系破裂时清理唯一性
                     if new_fav < 0 and old_rel:
                         new_rel = ""
-                        is_uniq = False # 关系破裂，唯一性自然失效
+                        is_uniq = False 
                         uniq_cat = None
                     
-                    # 检查是否有变更 (包括唯一性变更)
+                    # 检查是否有变更
                     old_is_uniq = record.get("is_unique", False)
-                    # 只有当 new_rel 有值且本次LLM指定了unique，或者本来就是unique，才更新
-                    # 如果本次没有指定 unique，但 rel 没有变，保持原状
                     final_is_uniq = is_uniq if is_uniq else (old_is_uniq if new_rel == old_rel else False)
                     final_uniq_cat = uniq_cat if uniq_cat else (record.get("unique_category") if new_rel == old_rel else None)
 
@@ -351,7 +347,6 @@ class FavourManagerTool(Star):
                 orig = comp.text
                 new_t = FAVOUR_PATTERN.sub("", orig)
                 new_t = RELATIONSHIP_PATTERN.sub("", new_t)
-                # [新增] 清洗唯一性标签
                 new_t = RELATIONSHIP_ATTR_PATTERN.sub("", new_t).strip()
                 
                 if orig != new_t: cleaned = True
@@ -383,7 +378,6 @@ class FavourManagerTool(Star):
         if rec:
             fav = rec["favour"]
             rel = rec["relationship"] or "无"
-            # [新增] 显示唯一性
             if rec.get("is_unique"):
                 rel += f" (唯一: {rec.get('unique_category', '未分类')})"
         else:
@@ -484,7 +478,6 @@ class FavourManagerTool(Star):
         lines = [f"# 当前会话好感度数据 (会话: {sid or '全局'})\n\n| 群昵称 | 用户 (ID) | 好感度 | 关系 | 唯一 |\n|----|----|----|----|----|"]
         for i, item in enumerate(session_data):
             gnic, pnic = infos[i]
-            # [修改] 增加唯一性标识显示
             uniq_str = "是" if item.get("is_unique") else ""
             lines.append(f"| {gnic} | {pnic} ({item['userid']}) | {item['favour']} | {item['relationship'] or '无'} | {uniq_str} |")
         
