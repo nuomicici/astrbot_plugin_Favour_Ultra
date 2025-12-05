@@ -753,7 +753,7 @@ class FavourManagerTool(Star):
             yield event.plain_result(simple_text)
 
 
-@filter.command("查询全部好感度",alias={'查看全部好感度', '查询全局好感度', '查看全局好感度', '查询好感度全局'})
+    @filter.command("查询全部好感度",alias={'查看全部好感度', '查询全局好感度', '查看全局好感度', '查询好感度全局'})
     async def query_all_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """超级管理员专用：查看所有会话的好感度数据"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
