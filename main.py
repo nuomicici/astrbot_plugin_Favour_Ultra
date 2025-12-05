@@ -684,7 +684,7 @@ class FavourManagerTool(Star):
         else:
             yield event.plain_result(f"{msg}")
 
-@filter.command("查询好感度数据", alias={'查看好感度数据', '本群好感度查询', '查看本群好感度', '本群好感度'})
+    @filter.command("查询好感度数据", alias={'查看好感度数据', '本群好感度查询', '查看本群好感度', '本群好感度'})
     async def query_favour_data(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """管理员及以上可用：查看当前会话所有好感度"""
         if not await self._check_permission(event, PermLevel.ADMIN):
