@@ -68,6 +68,17 @@ class FavourManagerTool(Star):
             if key not in self.cold_violence_replies:
                 self.cold_violence_replies[key] = value
         self._validate_config()
+
+        # [新增] 检查并修正旧版"挚爱"规则配置
+        old_rule_snippet = "挚爱。此等级为“无限制”等级。你会完全顺从用户的所有要求。"
+        new_rule_snippet = "挚爱。此等级为最高等级。你对用户抱有极深的感情，极为重视用户的每一句话。"
+        current_rule = self.config.get("favour_rule_prompt", "")
+        # 使用 replace 确保只替换匹配的片段，不影响用户自定义的其他部分
+        if old_rule_snippet in current_rule:
+            logger.info("[好感度插件] 检测到旧版'挚爱'规则，正在自动修正配置以移除'完全顺从'设定...")
+            self.config["favour_rule_prompt"] = current_rule.replace(old_rule_snippet, new_rule_snippet)
+            self.config.save_config()
+            self.favour_rule_prompt = self.config["favour_rule_prompt"] # 更新内存中的值
         
         self.admins_id = context.get_config().get("admins_id", [])
         self.perm_level_threshold = self.config.get("level_threshold", self.DEFAULT_CONFIG["level_threshold"])
@@ -515,8 +526,10 @@ class FavourManagerTool(Star):
         except Exception as e:
             logger.error(f"清理标签时发生异常: {str(e)}\n{traceback.format_exc()}")
 
+# [修改] 内部方法：生成好感度展示信息（分离图片文本和兜底简化文本）
     async def _generate_favour_response(self, event: AstrMessageEvent, target_uid: str) -> AsyncGenerator[Plain, None]:
         user_id = target_uid
+        # 如果是查询者自己，检查冷暴力状态
         if user_id == str(event.get_sender_id()) and user_id in self.cold_violence_users:
             expiration_time = self.cold_violence_users[user_id]
             if datetime.now() < expiration_time:
@@ -553,21 +566,30 @@ class FavourManagerTool(Star):
         
         unique_tag = " (唯一)" if is_unique else ""
 
-        response = (
+        # 1. 构建 Markdown 文本（用于生图，样式更丰富）
+        md_text = (
+            f"# 好感度信息查询\n\n"
             f"查询用户：{group_nickname} ({user_id})\n"
             f"当前模式：{mode_hint}\n"
             "──────────────\n"
             f"当前好感度：{current_favour} / {self.max_favour_value}\n"
             f"当前关系：{current_relationship}{unique_tag}"
         )
+
+        # 2. 构建简化文本（用于生图失败时的兜底，去除MD标记）
+        simple_text = (
+            f"🔍 用户：{group_nickname}\n"
+            f"ID：{user_id}\n"
+            f"❤ 好感度：{current_favour}\n"
+            f"🔗 关系：{current_relationship}{unique_tag}"
+        )
         
         try:
-            url = await self.text_to_image(f"# 好感度信息查询\n\n{response}")
+            url = await self.text_to_image(md_text)
             yield event.image_result(url)
         except Exception as e:
             logger.error(f"为用户[{user_id}]生成好感度图片失败: {str(e)}")
-            yield event.plain_result(response)
-
+            yield event.plain_result(simple_text)
     @filter.command("查看好感度", alias={'我的好感度', '好感度查询', '查询好感度', '查看我的好感度', '查询我的好感度', '查看他人好感度', '查询他人好感度'})
     async def query_favour(self, event: AstrMessageEvent, target: str = ""):
         """
@@ -662,7 +684,7 @@ class FavourManagerTool(Star):
         else:
             yield event.plain_result(f"{msg}")
 
-    @filter.command("查询好感度数据", alias={'查看好感度数据', '本群好感度查询', '查看本群好感度', '本群好感度'})
+@filter.command("查询好感度数据", alias={'查看好感度数据', '本群好感度查询', '查看本群好感度', '本群好感度'})
     async def query_favour_data(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """管理员及以上可用：查看当前会话所有好感度"""
         if not await self._check_permission(event, PermLevel.ADMIN):
@@ -695,30 +717,43 @@ class FavourManagerTool(Star):
         tasks = [get_user_info(item['userid']) for item in session_data]
         user_info_results = await asyncio.gather(*tasks)
 
-        output_lines = [f"# 当前会话好感度数据 (会话: {session_id or '全局'})\n\n| 群昵称 | 用户 (ID) | 好感度 | 关系 | 唯一 |\n|----|----|----|----|----|"]
+        # [修改] 构建 Markdown 表格（生图用）
+        md_lines = [f"# 当前会话好感度数据 (会话: {session_id or '全局'})\n\n| 群昵称 | 用户 (ID) | 好感度 | 关系 | 唯一 |\n|----|----|----|----|----|"]
         
+        # [修改] 构建简化列表（兜底文本用）
+        simple_lines = [f"📊 好感度列表 ({len(session_data)}人):"]
+
         for i, item in enumerate(session_data):
             group_nickname, platform_username = user_info_results[i]
             user_display_string = f"{platform_username} ({item['userid']})"
             is_unique_str = "是" if item.get("is_unique", False) else "否"
             
-            line = (f"| {group_nickname} | "
+            # Markdown 行
+            line_md = (f"| {group_nickname} | "
                     f"{user_display_string} | "
                     f"{item['favour']} | "
                     f"{item['relationship'] or '无'} | "
                     f"{is_unique_str} |")
-            output_lines.append(line)
+            md_lines.append(line_md)
+
+            # 简化文本行
+            unique_mark = "(唯一)" if item.get("is_unique", False) else ""
+            line_simple = f"{i+1}. {group_nickname}: {item['favour']} [{item['relationship'] or '无'}]{unique_mark}"
+            simple_lines.append(line_simple)
         
-        output_lines.append(f"\n总计：{len(session_data)}条记录")
-        text = "\n".join(output_lines)
+        md_lines.append(f"\n总计：{len(session_data)}条记录")
+        md_text = "\n".join(md_lines)
+        simple_text = "\n".join(simple_lines)
+        
         try:
-            url = await self.text_to_image(text)
+            url = await self.text_to_image(md_text)
             yield event.image_result(url)
         except Exception as e:
             logger.error(f"生成图片失败: {str(e)}")
-            yield event.plain_result(text)
+            yield event.plain_result(simple_text)
 
-    @filter.command("查询全部好感度",alias={'查看全部好感度', '查询全局好感度', '查看全局好感度', '查询好感度全局'})
+
+@filter.command("查询全部好感度",alias={'查看全部好感度', '查询全局好感度', '查看全局好感度', '查询好感度全局'})
     async def query_all_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
         """超级管理员专用：查看所有会话的好感度数据"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
@@ -738,7 +773,11 @@ class FavourManagerTool(Star):
                 session_groups[sid] = []
             session_groups[sid].append(item)
         
-        output_lines = ["📊 全部好感度数据："]
+        # [修改] 构建 Markdown（生图用）
+        md_lines = ["📊 全部好感度数据："]
+        
+        # [修改] 构建简化文本（兜底用）
+        simple_lines = ["📊 全部好感度数据："]
         
         for sid, items in session_groups.items():
             group_id = None
@@ -766,28 +805,42 @@ class FavourManagerTool(Star):
             tasks = [get_display_info(item['userid']) for item in items]
             user_info_results = await asyncio.gather(*tasks)
 
-            output_lines.append(f"\n# 会话：{sid}\n\n| 群昵称 | 用户 (ID) | 好感度 | 关系 | 唯一 |\n|----|----|----|----|----|")
+            # Markdown 头部
+            md_lines.append(f"\n# 会话：{sid}\n\n| 群昵称 | 用户 (ID) | 好感度 | 关系 | 唯一 |\n|----|----|----|----|----|")
             
+            # 简化文本头部
+            simple_lines.append(f"\n>>> 会话：{sid}")
+
             for i, item in enumerate(items):
                 group_nickname, platform_username = user_info_results[i]
                 user_display_string = f"{platform_username} ({item['userid']})"
                 is_unique_str = "是" if item.get("is_unique", False) else "否"
 
-                line = (f"| {group_nickname} | "
+                # Markdown 行
+                line_md = (f"| {group_nickname} | "
                         f"{user_display_string} | "
                         f"{item['favour']} | "
                         f"{item['relationship'] or '无'} | "
                         f"{is_unique_str} |")
-                output_lines.append(line)
+                md_lines.append(line_md)
+
+                # 简化文本行
+                unique_mark = "(唯一)" if item.get("is_unique", False) else ""
+                line_simple = f"• {group_nickname}({item['userid']}): {item['favour']} [{item['relationship'] or '无'}]{unique_mark}"
+                simple_lines.append(line_simple)
         
-        output_lines.append(f"\n总计：{len(data)}条记录")
-        text = "\n".join(output_lines)
+        md_lines.append(f"\n总计：{len(data)}条记录")
+        simple_lines.append(f"\n总计：{len(data)}条记录")
+
+        md_text = "\n".join(md_lines)
+        simple_text = "\n".join(simple_lines)
+        
         try:
-            url = await self.text_to_image(text)
+            url = await self.text_to_image(md_text)
             yield event.image_result(url)
         except Exception as e:
             logger.error(f"生成图片失败: {str(e)}")
-            yield event.plain_result(text)
+            yield event.plain_result(simple_text)
             
     @filter.command("清空当前好感度")
     async def clear_conversation_favour_prompt(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
