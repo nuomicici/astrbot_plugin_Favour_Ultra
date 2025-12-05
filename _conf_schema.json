@@ -135,5 +135,22 @@
     "type": "list",
     "default": [],
     "hint": "如果此列表不为空，则只有在此列表中的会话才启用好感度系统（黑名单失效）。"
+  },
+  "enable_decay": {
+    "description": "是否开启好感度衰减（遗忘）机制",
+    "type": "bool",
+    "default": false
+  },
+  "decay_period_hours": {
+    "description": "好感度衰减周期（小时）",
+    "type": "int",
+    "default": 24,
+    "hint": "每隔多少小时没有互动，好感度就会下降。"
+  },
+  "decay_value_per_period": {
+    "description": "每个周期衰减的好感度数值",
+    "type": "int",
+    "default": 1,
+    "hint": "例如设置为1，则每24小时不理Bot，好感度-1。"
   }
 }
