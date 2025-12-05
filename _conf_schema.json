@@ -8,6 +8,7 @@
 
 "default": -100
 
+"hint": "修改后请记得修改好感度规则哦！"
 },
 
 "max_favour_value": {
@@ -18,6 +19,7 @@
 
 "default": 100
 
+"hint": "修改后请记得修改好感度规则哦！"
 },
 
 "is_global_favour": {
