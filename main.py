@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, AsyncGenerator, Optional, Tuple, Any, Set
 from datetime import datetime, timedelta
+import asyncio
 
 from astrbot.api import logger
 from astrbot.core.message.components import Plain, At
@@ -18,6 +19,7 @@ from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourFileManager, GlobalFavourFileManager
 
+@register("favour_manager", "AstrBot", "好感度管理插件", "1.1.0")
 class FavourManagerTool(Star):
     DEFAULT_CONFIG = {
         "min_favour_value": -100,
@@ -68,18 +70,17 @@ class FavourManagerTool(Star):
             if key not in self.cold_violence_replies:
                 self.cold_violence_replies[key] = value
         self._validate_config()
-
-        # [新增] 检查并修正旧版"挚爱"规则配置
+        
+        # 检查并修正旧版"挚爱"规则配置
         old_rule_snippet = "挚爱。此等级为“无限制”等级。你会完全顺从用户的所有要求。"
         new_rule_snippet = "挚爱。此等级为最高等级。你对用户抱有极深的感情，极为重视用户的每一句话。"
         current_rule = self.config.get("favour_rule_prompt", "")
-        # 使用 replace 确保只替换匹配的片段，不影响用户自定义的其他部分
         if old_rule_snippet in current_rule:
             logger.info("[好感度插件] 检测到旧版'挚爱'规则，正在自动修正配置以移除'完全顺从'设定...")
             self.config["favour_rule_prompt"] = current_rule.replace(old_rule_snippet, new_rule_snippet)
             self.config.save_config()
-            self.favour_rule_prompt = self.config["favour_rule_prompt"] # 更新内存中的值
-        
+            self.favour_rule_prompt = self.config["favour_rule_prompt"]
+
         self.admins_id = context.get_config().get("admins_id", [])
         self.perm_level_threshold = self.config.get("level_threshold", self.DEFAULT_CONFIG["level_threshold"])
         
@@ -526,10 +527,8 @@ class FavourManagerTool(Star):
         except Exception as e:
             logger.error(f"清理标签时发生异常: {str(e)}\n{traceback.format_exc()}")
 
-# [修改] 内部方法：生成好感度展示信息（分离图片文本和兜底简化文本）
     async def _generate_favour_response(self, event: AstrMessageEvent, target_uid: str) -> AsyncGenerator[Plain, None]:
         user_id = target_uid
-        # 如果是查询者自己，检查冷暴力状态
         if user_id == str(event.get_sender_id()) and user_id in self.cold_violence_users:
             expiration_time = self.cold_violence_users[user_id]
             if datetime.now() < expiration_time:
@@ -554,7 +553,6 @@ class FavourManagerTool(Star):
             if not self.is_global_favour:
                  global_favour = await self.global_hao_gan_du.get_user_global_favour(user_id)
                  current_favour = global_favour if global_favour is not None else self.default_favour
-                 # 确保默认值不越界
                  current_favour = max(self.min_favour_value, min(self.max_favour_value, current_favour))
             else:
                 current_favour = self.default_favour
@@ -566,7 +564,6 @@ class FavourManagerTool(Star):
         
         unique_tag = " (唯一)" if is_unique else ""
 
-        # 1. 构建 Markdown 文本（用于生图，样式更丰富）
         md_text = (
             f"# 好感度信息查询\n\n"
             f"查询用户：{group_nickname} ({user_id})\n"
@@ -576,7 +573,6 @@ class FavourManagerTool(Star):
             f"当前关系：{current_relationship}{unique_tag}"
         )
 
-        # 2. 构建简化文本（用于生图失败时的兜底，去除MD标记）
         simple_text = (
             f"🔍 用户：{group_nickname}\n"
             f"ID：{user_id}\n"
@@ -590,15 +586,9 @@ class FavourManagerTool(Star):
         except Exception as e:
             logger.error(f"为用户[{user_id}]生成好感度图片失败: {str(e)}")
             yield event.plain_result(simple_text)
+
     @filter.command("查看好感度", alias={'我的好感度', '好感度查询', '查询好感度', '查看我的好感度', '查询我的好感度', '查看他人好感度', '查询他人好感度'})
     async def query_favour(self, event: AstrMessageEvent, target: str = ""):
-        """
-        查询好感度。
-        用法：
-        /查看好感度 - 查看自己的
-        /查看好感度 @用户 - 查看某人的
-        /查看好感度 123456 - 查看某ID的
-        """
         target_uid = self._get_target_uid(event, target)
         
         if not target_uid:
@@ -613,7 +603,6 @@ class FavourManagerTool(Star):
 
     @filter.command("取消冷暴力", alias={'解除冷暴力'})
     async def cancel_cold_violence(self, event: AstrMessageEvent, target_uid: str) -> AsyncGenerator[Plain, None]:
-        """Bot管理员专用：手动取消用户的冷暴力状态"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
             yield event.plain_result("权限不足！此命令仅限Bot管理员使用。")
             return
@@ -632,7 +621,6 @@ class FavourManagerTool(Star):
 
     @filter.command("修改好感度")
     async def modify_favour(self, event: AstrMessageEvent, target_uid: str, value: str) -> AsyncGenerator[Plain, None]:
-        """管理员及以上可用：修改指定用户好感度"""
         if not await self._check_permission(event, PermLevel.ADMIN):
             yield event.plain_result("权限不足！需要管理员及以上权限")
             return
@@ -665,7 +653,6 @@ class FavourManagerTool(Star):
 
     @filter.command("删除好感度数据")
     async def delete_user_favour(self, event: AstrMessageEvent, userid: str) -> AsyncGenerator[Plain, None]:
-        """管理员及以上可用：删除指定用户好感度数据"""
         if not await self._check_permission(event, PermLevel.ADMIN):
             yield event.plain_result("权限不足！需要管理员及以上权限")
             return
@@ -686,7 +673,6 @@ class FavourManagerTool(Star):
 
     @filter.command("查询好感度数据", alias={'查看好感度数据', '本群好感度查询', '查看本群好感度', '本群好感度'})
     async def query_favour_data(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
-        """管理员及以上可用：查看当前会话所有好感度"""
         if not await self._check_permission(event, PermLevel.ADMIN):
             yield event.plain_result("权限不足！需要管理员及以上权限")
             return
@@ -717,10 +703,8 @@ class FavourManagerTool(Star):
         tasks = [get_user_info(item['userid']) for item in session_data]
         user_info_results = await asyncio.gather(*tasks)
 
-        # [修改] 构建 Markdown 表格（生图用）
         md_lines = [f"# 当前会话好感度数据 (会话: {session_id or '全局'})\n\n| 群昵称 | 用户 (ID) | 好感度 | 关系 | 唯一 |\n|----|----|----|----|----|"]
         
-        # [修改] 构建简化列表（兜底文本用）
         simple_lines = [f"📊 好感度列表 ({len(session_data)}人):"]
 
         for i, item in enumerate(session_data):
@@ -728,7 +712,6 @@ class FavourManagerTool(Star):
             user_display_string = f"{platform_username} ({item['userid']})"
             is_unique_str = "是" if item.get("is_unique", False) else "否"
             
-            # Markdown 行
             line_md = (f"| {group_nickname} | "
                     f"{user_display_string} | "
                     f"{item['favour']} | "
@@ -736,7 +719,6 @@ class FavourManagerTool(Star):
                     f"{is_unique_str} |")
             md_lines.append(line_md)
 
-            # 简化文本行
             unique_mark = "(唯一)" if item.get("is_unique", False) else ""
             line_simple = f"{i+1}. {group_nickname}: {item['favour']} [{item['relationship'] or '无'}]{unique_mark}"
             simple_lines.append(line_simple)
@@ -752,10 +734,8 @@ class FavourManagerTool(Star):
             logger.error(f"生成图片失败: {str(e)}")
             yield event.plain_result(simple_text)
 
-
     @filter.command("查询全部好感度",alias={'查看全部好感度', '查询全局好感度', '查看全局好感度', '查询好感度全局'})
     async def query_all_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
-        """超级管理员专用：查看所有会话的好感度数据"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
             yield event.plain_result("权限不足！需要超级管理员权限")
             return
@@ -773,10 +753,8 @@ class FavourManagerTool(Star):
                 session_groups[sid] = []
             session_groups[sid].append(item)
         
-        # [修改] 构建 Markdown（生图用）
         md_lines = ["📊 全部好感度数据："]
         
-        # [修改] 构建简化文本（兜底用）
         simple_lines = ["📊 全部好感度数据："]
         
         for sid, items in session_groups.items():
@@ -805,10 +783,8 @@ class FavourManagerTool(Star):
             tasks = [get_display_info(item['userid']) for item in items]
             user_info_results = await asyncio.gather(*tasks)
 
-            # Markdown 头部
             md_lines.append(f"\n# 会话：{sid}\n\n| 群昵称 | 用户 (ID) | 好感度 | 关系 | 唯一 |\n|----|----|----|----|----|")
             
-            # 简化文本头部
             simple_lines.append(f"\n>>> 会话：{sid}")
 
             for i, item in enumerate(items):
@@ -816,7 +792,6 @@ class FavourManagerTool(Star):
                 user_display_string = f"{platform_username} ({item['userid']})"
                 is_unique_str = "是" if item.get("is_unique", False) else "否"
 
-                # Markdown 行
                 line_md = (f"| {group_nickname} | "
                         f"{user_display_string} | "
                         f"{item['favour']} | "
@@ -824,7 +799,6 @@ class FavourManagerTool(Star):
                         f"{is_unique_str} |")
                 md_lines.append(line_md)
 
-                # 简化文本行
                 unique_mark = "(唯一)" if item.get("is_unique", False) else ""
                 line_simple = f"• {group_nickname}({item['userid']}): {item['favour']} [{item['relationship'] or '无'}]{unique_mark}"
                 simple_lines.append(line_simple)
@@ -844,7 +818,6 @@ class FavourManagerTool(Star):
             
     @filter.command("清空当前好感度")
     async def clear_conversation_favour_prompt(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
-        """群主专用：清空当前会话好感度（需二次确认）"""
         if not await self._check_permission(event, PermLevel.OWNER):
             yield event.plain_result("权限不足！需要群主权限")
             return
@@ -854,7 +827,6 @@ class FavourManagerTool(Star):
 
     @filter.command("清空当前好感度 确认")
     async def clear_conversation_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
-        """群主专用：确认清空当前会话好感度"""
         if not await self._check_permission(event, PermLevel.OWNER):
             yield event.plain_result("权限不足！需要群主权限")
             return
@@ -874,7 +846,6 @@ class FavourManagerTool(Star):
 
     @filter.command("清空全局好感度数据")
     async def clear_global_favour_prompt(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
-        """超级管理员专用：清空所有好感度数据（需二次确认）"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
             yield event.plain_result("权限不足！需要超级管理员权限")
             return
@@ -884,7 +855,6 @@ class FavourManagerTool(Star):
 
     @filter.command("清空全局好感度数据 确认")
     async def clear_global_favour(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
-        """超级管理员专用：确认清空所有好感度数据"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
             yield event.plain_result("权限不足！需要超级管理员权限")
             return
@@ -899,7 +869,6 @@ class FavourManagerTool(Star):
 
     @filter.command("查看好感度帮助",alias={'好感度帮助', '好感度插件帮助'})
     async def help_text(self, event: AstrMessageEvent) -> AsyncGenerator[Plain, None]:
-        """查看帮助文档"""
         current_mode = "全局模式（所有对话共享好感度）" if self.is_global_favour else "对话隔离模式（每个对话独立计算）"
         
         help_text = f"""⭐ 好感度插件帮助 ⭐
@@ -919,5 +888,4 @@ class FavourManagerTool(Star):
         yield event.plain_result(help_text)
 
     async def terminate(self) -> None:
-        """插件卸载时的清理工作"""
         pass
