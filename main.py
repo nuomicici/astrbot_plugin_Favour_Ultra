@@ -19,7 +19,6 @@ from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourFileManager, GlobalFavourFileManager
 
-@register("favour_manager", "AstrBot", "好感度管理插件", "1.2.0")
 class FavourManagerTool(Star):
     DEFAULT_CONFIG = {
         "min_favour_value": -100,
