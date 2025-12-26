@@ -554,6 +554,8 @@ class FavourManagerTool(Star):
         if not result or not result.chain:
             return
         
+        trigger_msg_to_append = None  # 用于暂存需要追加的冷暴力提示语
+
         if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'message_id'):
             message_id = str(event.message_obj.message_id)
             update_data = self.pending_updates.pop(message_id, None)
@@ -626,13 +628,14 @@ class FavourManagerTool(Star):
                             self.cold_violence_users[cv_key] = datetime.now() + duration
                             
                             trigger_message = self.cold_violence_replies.get("on_trigger")
-                            if trigger_message and result and result.chain:
-                                result.chain.append(Plain(f"\n{trigger_message}"))
+                            if trigger_message:
+                                trigger_msg_to_append = trigger_message # 暂存，稍后追加
                             logger.info(f"用户[{user_id}]触发冷暴力模式 (Key: {cv_key})，持续 {self.cold_violence_duration_minutes} 分钟")
 
                 except Exception as e:
                     logger.error(f"更新好感度时发生异常: {str(e)}\n{traceback.format_exc()}")
 
+        # 1. 先清理 LLM 输出中的标签
         try:
             new_chain = []
             cleaned = False
@@ -652,6 +655,10 @@ class FavourManagerTool(Star):
                 result.chain = new_chain
         except Exception as e:
             logger.error(f"清理标签时发生异常: {str(e)}\n{traceback.format_exc()}")
+
+        if trigger_msg_to_append:
+            result.chain.append(Plain(text=f"\n{trigger_msg_to_append}"))
+
 
     async def _generate_favour_response(self, event: AstrMessageEvent, target_uid: str) -> AsyncGenerator[Plain, None]:
         user_id = target_uid
