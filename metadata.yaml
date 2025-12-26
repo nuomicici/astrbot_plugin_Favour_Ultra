@@ -1,6 +1,6 @@
-name: astrbot_plugin_Favour_Ultra
+name: "astrbot_plugin_Favour_Ultra"
 display_name: "可自定义好感度/关系管理系统"
 author: 糯米茨
-version: v3.0.0
+version: v3.0.1
 desc: "（更新3.0后先重载一次！）可以自由设置的好感度插件，好感度过低可以“冷暴力”，多方保证好感度能生效，让你的BOT更加拟人！好感度的等级可以自行定义，采用和现有好感度插件完全不同的运作方式"
 repo: https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
