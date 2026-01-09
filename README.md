@@ -1,7 +1,7 @@
 <div align="center">
-<img style="width:100%" src="https://count.getloli.com/@astrbot_plugin_Favour_Ultra?name=astrbot_plugin_Favour_Ultra&theme=booru-lewd&padding=5&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Banner">
+<img style="width:70%" src="https://count.getloli.com/@astrbot_plugin_Favour_Ultra?name=astrbot_plugin_Favour_Ultra&theme=booru-lewd&padding=5&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Banner">
 
-# 好感度/关系管理插件
+# 好感度/关系管理插件 (Ultra)
 
 [![版本](https://img.shields.io/badge/版本-v3.1.0-blue?style=flat-square)](#版本记录)
 [![适配](https://img.shields.io/badge/AstrBot-v3.4+-purple?style=flat-square)](#安装与配置)
@@ -169,8 +169,9 @@ git clone https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
 
 如果您在使用中遇到问题，或有新的功能建议，欢迎反馈：
 
-*   **GitHub Issues**: [提交反馈](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues)
-*   **QQ 交流**: [点击联系作者](https://qm.qq.com/q/wMGXYfKKoS)
+| 作者信息 | 交流/反馈 |
+| :--- | :--- |
+| **作者**: 糯米茨<br>**联系方式**: （许愿通道）<br>- [GitHub Issues](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues)<br>- [QQ](https://qm.qq.com/q/wMGXYfKKoS) | <img src="QC.jpg" width="240px" alt="扫码加群"> |
 
 <div align="center">
 如果不介意的话，可以给项目点一个 Star ⭐ 支持一下！
