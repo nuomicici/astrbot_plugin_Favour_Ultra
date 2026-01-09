@@ -3,7 +3,7 @@
 
 # 好感度/关系管理插件 (Ultra)
 
-[![查看更新日志（v3.0.2）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](#10-版本信息) 
+[![查看更新日志（v3.0.2）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](##更新日志) 
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#11-未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
@@ -145,7 +145,7 @@ git clone https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
 
 ---
 
-## 📅 版本记录
+## 更新日志
 
 ### v3.1.0 (2026-01-09)
 *   **架构升级**：弃用 JSON 文件存储，全面迁移至 SQLite 数据库。
@@ -162,6 +162,17 @@ git clone https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
 ### v3.0.0 (2025-12-05)
 *   新增关系唯一性判断（如：只能有一个“恋人”）。
 *   优化 T2I 输出容错率。
+
+---
+
+## 11. 未来计划
+- [x] 添加“冷暴力处理”，当好感度低于特定值的时候，会进入冷暴力模式，防止恶意用户捣乱
+- [x] 目前冷暴力是全局模式，暂时没有办法分对话冷暴力。后续稍微改改
+- [ ] 添加模型判断，让好感度的判断不再局限与当前用于回复的LLM模型
+- [x] 关系的唯一性
+- [ ] 启用群聊白名单功能
+- [ ] 待定，欢迎补充~
+- [x] 数据库存储好感度数据，提升写入读取速度
 
 ---
 
