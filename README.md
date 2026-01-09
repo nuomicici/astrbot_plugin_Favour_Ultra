@@ -3,7 +3,7 @@
 
 # 好感度/关系管理插件 (Ultra)
 
-[![查看更新日志（v3.1.0）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](##更新日志) 
+[![查看更新日志（v3.1.0）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](#更新日志) 
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
