@@ -1,8 +1,8 @@
 <div align="center">
 <img style="width:70%" src="https://count.getloli.com/@astrbot_plugin_Favour_Ultra?name=astrbot_plugin_Favour_Ultra&theme=booru-lewd&padding=5&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt=":name">
 
-# 好感度/关系管理插件
 
+# 好感度/关系管理插件
 
 [![查看更新日志（v3.0.2）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](#10-版本信息) 
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#11-未来计划)
