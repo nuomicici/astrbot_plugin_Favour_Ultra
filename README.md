@@ -4,7 +4,7 @@
 # 好感度/关系管理插件 (Ultra)
 
 [![查看更新日志（v3.0.2）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](##更新日志) 
-[![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#11-未来计划)
+[![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
 > **最新动态 (2026-01-09)**
@@ -165,7 +165,7 @@ git clone https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
 
 ---
 
-## 11. 未来计划
+## 未来计划
 - [x] 添加“冷暴力处理”，当好感度低于特定值的时候，会进入冷暴力模式，防止恶意用户捣乱
 - [x] 目前冷暴力是全局模式，暂时没有办法分对话冷暴力。后续稍微改改
 - [ ] 添加模型判断，让好感度的判断不再局限与当前用于回复的LLM模型
@@ -176,7 +176,7 @@ git clone https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
 
 ---
 
-## 🤝 联系与反馈
+## 联系
 
 如果您在使用中遇到问题，或有新的功能建议，欢迎反馈：
 
