@@ -3,15 +3,18 @@
 
 # 好感度/关系管理插件 (Ultra)
 
-[![查看更新日志（v3.0.2）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](##更新日志) 
+[![查看更新日志（v3.1.0）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](##更新日志) 
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
+
+<div align="left" style="width:70%">
 
 **最新动态 (2026-01-09)**
 
 ❗ **重要升级**：v3.1.0 版本引入了 SQLite 数据库存储，启动时会自动迁移旧版 JSON 数据。
 * 请务必在更新后重载插件以应用新的配置结构。
 
+</div>
 </div>
 
 ---
