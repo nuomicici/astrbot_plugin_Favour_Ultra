@@ -3,9 +3,9 @@
 
 # 好感度/关系管理插件 (Ultra)
 
-[![版本](https://img.shields.io/badge/版本-v3.1.0-blue?style=flat-square)](#版本记录)
-[![适配](https://img.shields.io/badge/AstrBot-v3.4+-purple?style=flat-square)](#安装与配置)
-[![状态](https://img.shields.io/badge/状态-活跃维护-success?style=flat-square)](#联系与反馈)
+[![查看更新日志（v3.0.2）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](#10-版本信息) 
+[![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#11-未来计划)
+[![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
 > **最新动态 (2026-01-09)**
 >
