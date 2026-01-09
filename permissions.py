@@ -51,36 +51,36 @@ class PermissionManager:
     ) -> int:
         """获取用户在群内的权限级别"""
         try:
-            group_id = event.get_group_id()
-            if not group_id or not str(group_id).strip():
-                logger.debug("群组ID为空，返回未知权限")
-                return PermLevel.UNKNOWN
-                
-            if not user_id or not str(user_id).strip():
-                logger.debug("用户ID为空，返回未知权限")
-                return PermLevel.UNKNOWN
-
-            try:
-                group_id = int(str(group_id).strip())
-                user_id = int(str(user_id).strip())
-            except ValueError as e:
-                logger.error(f"ID转换失败: group_id={group_id}, user_id={user_id}, error={str(e)}")
-                return PermLevel.UNKNOWN
-
-            if group_id == 0 or user_id == 0:
-                return PermLevel.UNKNOWN
-
+            # 检查超级用户
             if str(user_id) in self.superusers:
                 return PermLevel.SUPERUSER
 
+            group_id = event.get_group_id()
+            if not group_id:
+                # 私聊或其他情况，默认为 MEMBER，除非是超级用户
+                return PermLevel.MEMBER
+                
+            if not user_id:
+                return PermLevel.UNKNOWN
+
+            # 尝试转换为 int，因为 OneBot 协议通常使用 int
+            # 但为了兼容性，如果转换失败则保持原样或返回 UNKNOWN
+            try:
+                group_id_int = int(str(group_id).strip())
+                user_id_int = int(str(user_id).strip())
+            except ValueError:
+                # 非数字ID，无法通过 get_group_member_info 获取信息
+                # 这里可以扩展其他平台的获取方式，目前暂返回 MEMBER
+                return PermLevel.MEMBER
+
             try:
                 info = await event.bot.get_group_member_info(
-                    group_id=group_id, 
-                    user_id=user_id, 
+                    group_id=group_id_int, 
+                    user_id=user_id_int, 
                     no_cache=True
                 )
             except Exception as e:
-                logger.error(f"获取群成员信息失败: {str(e)}\n{traceback.format_exc()}")
+                # 获取失败（可能不在群里），返回 UNKNOWN
                 return PermLevel.UNKNOWN
 
             role = info.get("role", "unknown")
@@ -96,5 +96,5 @@ class PermissionManager:
                 return PermLevel.UNKNOWN
 
         except Exception as e:
-            logger.error(f"权限检查过程中发生错误: {str(e)}\n{traceback.format_exc()}")
+            logger.error(f"权限检查过程中发生错误: {str(e)}")
             return PermLevel.UNKNOWN
