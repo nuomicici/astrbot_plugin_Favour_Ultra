@@ -21,6 +21,12 @@
     "default": true,
     "hint": "开启后，当好感度低于阈值时触发冷暴力（拒绝回复/敷衍）。"
   },
+  "enable_relationship_table": {
+    "description": "是否向LLM注入当前会话关系表",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，会在Prompt中告知LLM当前群聊中其他已建立关系的用户（如：用户123|挚友|90）。有助于LLM处理复杂的人际关系。"
+  },
   "min_favour_value": {
     "description": "好感度数值下限（例如 -100）",
     "type": "int",
