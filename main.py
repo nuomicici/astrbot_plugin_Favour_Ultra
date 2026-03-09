@@ -23,7 +23,6 @@ from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourDBManager, FavourRecord
 
-@register("astrbot_plugin_favour_ultra", "Soulter", "好感度插件(Ultra版)", "3.2.3", "https://github.com/Soulter/astrbot_plugin_favour_ultra")
 class FavourManagerTool(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -31,8 +30,7 @@ class FavourManagerTool(Star):
         
         # 统计配置
         self.allow_telemetry = self.config.get("allow_telemetry", False)
-        # TODO: 请将此处的 URL 替换为您实际搭建的统计站点接收地址
-        self.telemetry_url = "http://127.0.0.1:8000/api/report" 
+        self.telemetry_url = "http://plugins.nuomici.press/api/report" 
         
         # 基础配置
         self.favour_mode = self.config.get("favour_mode", "galgame")
