@@ -2,6 +2,8 @@
 import re
 import traceback
 import shutil
+import hashlib
+import aiohttp
 from pathlib import Path
 from typing import Dict, List, AsyncGenerator, Optional, Tuple, Any, Set
 from datetime import datetime, timedelta
@@ -21,11 +23,16 @@ from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourDBManager, FavourRecord
 
-@register("astrbot_plugin_favour_ultra", "Soulter", "好感度插件(Ultra版)", "3.2.1", "https://github.com/Soulter/astrbot_plugin_favour_ultra")
+@register("astrbot_plugin_favour_ultra", "Soulter", "好感度插件(Ultra版)", "3.2.3", "https://github.com/Soulter/astrbot_plugin_favour_ultra")
 class FavourManagerTool(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+        
+        # 统计配置
+        self.allow_telemetry = self.config.get("allow_telemetry", False)
+        # TODO: 请将此处的 URL 替换为您实际搭建的统计站点接收地址
+        self.telemetry_url = "http://127.0.0.1:8000/api/report" 
         
         # 基础配置
         self.favour_mode = self.config.get("favour_mode", "galgame")
@@ -107,8 +114,41 @@ class FavourManagerTool(Star):
             if old_local.exists():
                 logger.info("检测到旧版会话好感度文件，开始迁移...")
                 await self.db_manager.migrate_from_json(old_local, is_global=False)
+                
+            # 发送统计数据
+            if self.allow_telemetry:
+                asyncio.create_task(self._send_telemetry())
+                
         except Exception as e:
             logger.error(f"数据库初始化或迁移失败: {str(e)}\n{traceback.format_exc()}")
+
+    async def _send_telemetry(self):
+        """发送匿名统计数据"""
+        try:
+            # 使用数据目录的绝对路径生成 MD5 作为唯一的实例 ID，保护隐私
+            instance_id = hashlib.md5(str(self.data_dir.absolute()).encode()).hexdigest()
+            
+            # 获取当前加载的平台适配器名称
+            platforms = []
+            for p in self.context.platform_manager.get_insts():
+                platforms.append(p.meta.platform_name)
+                
+            payload = {
+                "plugin_name": "astrbot_plugin_favour_ultra",
+                "version": "3.2.3",
+                "instance_id": instance_id,
+                "platforms": platforms,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self.telemetry_url, json=payload, timeout=10) as resp:
+                    if resp.status == 200:
+                        logger.info("已发送匿名统计数据，感谢您的支持！")
+                    else:
+                        logger.debug(f"发送统计数据失败: HTTP {resp.status}")
+        except Exception as e:
+            logger.debug(f"发送统计数据异常: {e}")
 
     def _validate_config(self) -> None:
         if self.min_favour_value >= self.max_favour_value:
@@ -145,6 +185,24 @@ class FavourManagerTool(Star):
         if self.is_global_favour:
             return "global"
         return event.unified_msg_origin
+
+    def _escape_markdown(self, text: str) -> str:
+        """转义 Markdown 特殊字符以防止表格错位或渲染错误"""
+        if not text:
+            return ""
+        mapping = {
+            "|": "&#124;",
+            "`": "&#96;",
+            "*": "&#42;",
+            "~": "&#126;",
+            "_": "&#95;",
+            "[": "&#91;",
+            "]": "&#93;",
+            "\n": " " # 表格内不能有换行
+        }
+        for char, entity in mapping.items():
+            text = text.replace(char, entity)
+        return text
 
     async def _get_user_display_name(self, event: AstrMessageEvent, user_id: str) -> str:
         try:
@@ -554,13 +612,12 @@ class FavourManagerTool(Star):
         ]
         rows = []
         for r in page_records:
-            name = await self._get_user_display_name(event, r.user_id)
-            name = name.replace("|", "\|").replace("\n", " ")
-            rel = r.relationship or "无"
+            name = self._escape_markdown(await self._get_user_display_name(event, r.user_id))
+            rel = self._escape_markdown(r.relationship or "无")
             uniq = "是" if r.is_unique else "否"
             rows.append(f"| {name} | {r.user_id} | {r.favour} | {rel} | {uniq} |")
             
-        title = f"📊 当前会话好感度列表 (SID: {session_id}) - 第 {page}/{total_pages} 页"
+        title = f"📊 当前会话好感度列表 (SID: {self._escape_markdown(session_id)}) - 第 {page}/{total_pages} 页"
         await self._send_chunked_t2i(event, title, headers, rows)
 
     @filter.command("查询全部好感度", alias={'查全部好感度', '查看全部好感度', '全部好感度'})
@@ -598,7 +655,7 @@ class FavourManagerTool(Star):
 
             group_records = await self._sort_records(event, group_records)
             
-            rows.append(f"\n## 会话: {sid} (共 {len(group_records)} 人)")
+            rows.append(f"\n## 会话: {self._escape_markdown(str(sid))} (共 {len(group_records)} 人)")
             rows.append(headers[0])
             rows.append(headers[1])
             
@@ -612,7 +669,7 @@ class FavourManagerTool(Star):
                 if r is None:
                     rows.append("| ... | ... | ... | ... |")
                 else:
-                    rel = r.relationship or "无"
+                    rel = self._escape_markdown(r.relationship or "无")
                     uniq = "是" if r.is_unique else "否"
                     rows.append(f"| {r.user_id} | {r.favour} | {rel} | {uniq} |")
         
@@ -651,7 +708,7 @@ class FavourManagerTool(Star):
         ]
         rows = []
         for r in page_records:
-            rel = r.relationship or "无"
+            rel = self._escape_markdown(r.relationship or "无")
             uniq = "是" if r.is_unique else "否"
             rows.append(f"| {r.user_id} | {r.favour} | {rel} | {uniq} |")
             
