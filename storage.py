@@ -68,7 +68,10 @@ class FavourDBManager:
                         columns = [row[1] for row in result.fetchall()]
                         if "created_at" not in columns:
                             logger.info("正在升级数据库：添加 created_at 字段...")
-                            await conn.execute(text("ALTER TABLE favour_records ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP"))
+                            # SQLite ALTER TABLE ADD COLUMN 不能使用 CURRENT_TIMESTAMP 作为默认值
+                            await conn.execute(text("ALTER TABLE favour_records ADD COLUMN created_at DATETIME"))
+                            # 将旧数据的 created_at 设置为当前的 updated_at
+                            await conn.execute(text("UPDATE favour_records SET created_at = updated_at WHERE created_at IS NULL"))
                             logger.info("数据库升级完成。")
 
                 self._initialized = True
