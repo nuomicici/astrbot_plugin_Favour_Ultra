@@ -15,11 +15,23 @@
     "default": false,
     "hint": "开启时所有对话共享好感度；关闭时每个对话独立计算好感度。\n目前开启全局无法同步独立会话好感（防止刷分）。"
   },
+  "group_sort_by": {
+    "description": "群组好感度排序方式",
+    "type": "string",
+    "default": "default",
+    "options": [
+      "default",
+      "favour",
+      "nickname",
+      "userid"
+    ],
+    "hint": "default: 按添加时间排序\nfavour: 按好感度从高到低排序\nnickname: 按昵称A-Z排序\nuserid: 按用户ID排序"
+  },
   "enable_cold_violence": {
     "description": "是否启用冷暴力模式",
     "type": "bool",
     "default": true,
-    "hint": "开启后，当好感度低于阈值时触发冷暴力（拒绝回复/敷衍）。"
+    "hint": "开启后，当好感度连续降低达到指定次数时触发冷暴力（拒绝回复/敷衍）。"
   },
   "enable_relationship_table": {
     "description": "是否向LLM注入当前会话关系表",
@@ -115,13 +127,13 @@
   "cold_violence_config": {
     "description": "冷暴力模式配置",
     "type": "object",
-    "hint": "配置当好感度过低时触发的冷暴力行为。",
+    "hint": "配置当好感度连续降低时触发的冷暴力行为。",
     "items": {
-      "threshold": {
-        "description": "触发阈值",
+      "consecutive_decrease_threshold": {
+        "description": "连续降低触发次数",
         "type": "int",
-        "default": -50,
-        "hint": "当好感度降低到此值或以下时，将触发冷暴力模式。"
+        "default": 3,
+        "hint": "当好感度连续降低达到此次数时，将触发冷暴力模式。"
       },
       "duration_minutes": {
         "description": "持续时间（分钟）",
