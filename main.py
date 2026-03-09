@@ -21,7 +21,7 @@ from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourDBManager, FavourRecord
 
-@register("astrbot_plugin_favour_ultra", "Soulter", "好感度插件(Ultra版)", "3.2.0", "https://github.com/Soulter/astrbot_plugin_favour_ultra")
+@register("astrbot_plugin_favour_ultra", "Soulter", "好感度插件(Ultra版)", "3.2.1", "https://github.com/Soulter/astrbot_plugin_favour_ultra")
 class FavourManagerTool(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -179,7 +179,7 @@ class FavourManagerTool(Star):
         is_admin = await self._check_permission(event, PermLevel.OWNER) 
         
         base = self.admin_default_favour if (is_envoy or is_admin) else self.default_favour
-        return max(self.min_favour_value, min(self.max_val, base))
+        return max(self.min_favour_value, min(self.max_favour_value, base))
 
     def _get_cold_violence_key(self, user_id: str, session_id: Optional[str]) -> str:
         if self.cold_violence_is_global:
