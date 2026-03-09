@@ -1,3 +1,4 @@
+# permissions.py
 import traceback
 from typing import Optional, List
 from astrbot.api import logger
