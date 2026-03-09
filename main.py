@@ -23,6 +23,7 @@ from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourDBManager, FavourRecord
 
+@register("astrbot_plugin_favour_ultra", "Soulter", "好感度插件(Ultra版)", "3.2.4", "https://github.com/nuomicici/astrbot_plugin_favour_ultra")
 class FavourManagerTool(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -30,7 +31,8 @@ class FavourManagerTool(Star):
         
         # 统计配置
         self.allow_telemetry = self.config.get("allow_telemetry", False)
-        self.telemetry_url = "http://plugins.nuomici.press/api/report" 
+        # TODO: 请将此处的 URL 替换为您实际搭建的统计站点接收地址
+        self.telemetry_url = "http://127.0.0.1:8000/api/report" 
         
         # 基础配置
         self.favour_mode = self.config.get("favour_mode", "galgame")
@@ -126,14 +128,26 @@ class FavourManagerTool(Star):
             # 使用数据目录的绝对路径生成 MD5 作为唯一的实例 ID，保护隐私
             instance_id = hashlib.md5(str(self.data_dir.absolute()).encode()).hexdigest()
             
-            # 获取当前加载的平台适配器名称
+            # 获取当前加载的平台适配器名称 (稳健获取方式)
             platforms = []
-            for p in self.context.platform_manager.get_insts():
-                platforms.append(p.meta.platform_name)
+            try:
+                for p in self.context.platform_manager.get_insts():
+                    name = "unknown"
+                    if hasattr(p, 'get_platform_name'):
+                        name = p.get_platform_name()
+                    elif hasattr(p, 'meta'):
+                        # 如果 meta 是方法则调用，如果是对象则取属性
+                        meta = p.meta() if callable(p.meta) else p.meta
+                        name = getattr(meta, 'platform_name', 'unknown')
+                    
+                    if name and name != "unknown":
+                        platforms.append(str(name))
+            except:
+                pass
                 
             payload = {
                 "plugin_name": "astrbot_plugin_favour_ultra",
-                "version": "3.2.3",
+                "version": "3.2.4",
                 "instance_id": instance_id,
                 "platforms": platforms,
                 "timestamp": datetime.now().isoformat()
@@ -900,8 +914,8 @@ class FavourManagerTool(Star):
                 if record:
                     backup_file = await self.db_manager.backup_data([record], f"backup_user_{uid}_{sid}")
                     await self.db_manager.delete_favour(uid, sid)
-                    await evt.send(evt.plain_result(f"✅ 已清空用户 {uid} 的好感度数据。\n备份文件已保存至: {backup_file}"))
-                    logger.info(f"管理员 {evt.get_sender_id()} 清空了用户 {uid} 在会话 {sid} 的好感度")
+                    await evt.send(evt.plain_result(f"✅ 已清空用户 {uid} 的好感度数据。"))
+                    logger.info(f"管理员 {evt.get_sender_id()} 清空了用户 {uid} 在会话 {sid} 的好感度，备份文件已保存至: {backup_file}")
                 else:
                     await evt.send(evt.plain_result("该用户在当前会话无好感度记录。"))
             else:
@@ -932,8 +946,8 @@ class FavourManagerTool(Star):
                 if records:
                     backup_file = await self.db_manager.backup_data(records, f"backup_session_{sid}")
                     await self.db_manager.clear_session(sid)
-                    await evt.send(evt.plain_result(f"✅ 已清空当前会话的所有好感度数据。\n备份文件已保存至: {backup_file}"))
-                    logger.info(f"管理员 {evt.get_sender_id()} 清空了会话 {sid} 的所有好感度")
+                    await evt.send(evt.plain_result(f"✅ 已清空当前会话的所有好感度数据。"))
+                    logger.info(f"管理员 {evt.get_sender_id()} 清空了会话 {sid} 的所有好感度，备份文件已保存至: {backup_file}")
                 else:
                     await evt.send(evt.plain_result("当前会话无好感度记录。"))
             else:
@@ -963,8 +977,8 @@ class FavourManagerTool(Star):
                 if records:
                     backup_file = await self.db_manager.backup_data(records, "backup_all_database")
                     await self.db_manager.clear_all()
-                    await evt.send(evt.plain_result(f"✅ 已清空所有好感度数据。\n备份文件已保存至: {backup_file}"))
-                    logger.warning(f"Bot管理员 {evt.get_sender_id()} 清空了所有好感度数据！")
+                    await evt.send(evt.plain_result(f"✅ 已清空所有好感度数据。"))
+                    logger.warning(f"Bot管理员 {evt.get_sender_id()} 清空了所有好感度数据！备份文件已保存至: {backup_file}")
                 else:
                     await evt.send(evt.plain_result("数据库中无好感度记录。"))
             else:
