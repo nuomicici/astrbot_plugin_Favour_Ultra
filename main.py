@@ -1,3 +1,4 @@
+# main.py
 import re
 import traceback
 import shutil
@@ -14,12 +15,13 @@ from astrbot.api.star import Star, register, Context
 from astrbot.api import AstrBotConfig
 from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api.event import filter
+from astrbot.core.utils.session_waiter import session_waiter, SessionController
 
 from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourDBManager, FavourRecord
 
-@register("astrbot_plugin_favour_ultra", "Soulter", "好感度插件(Ultra版)", "3.1.2", "https://github.com/Soulter/astrbot_plugin_favour_ultra")
+@register("astrbot_plugin_favour_ultra", "Soulter", "好感度插件(Ultra版)", "3.2.0", "https://github.com/Soulter/astrbot_plugin_favour_ultra")
 class FavourManagerTool(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -28,6 +30,7 @@ class FavourManagerTool(Star):
         # 基础配置
         self.favour_mode = self.config.get("favour_mode", "galgame")
         self.is_global_favour = self.config.get("is_global_favour", False)
+        self.group_sort_by = self.config.get("group_sort_by", "default")
         self.enable_cold_violence = self.config.get("enable_cold_violence", True)
         self.enable_relationship_table = self.config.get("enable_relationship_table", True)
         self.min_favour_value = self.config.get("min_favour_value", -100)
@@ -49,7 +52,7 @@ class FavourManagerTool(Star):
 
         # 冷暴力配置
         cv_conf = self.config.get("cold_violence_config", {})
-        self.cold_violence_threshold = cv_conf.get("threshold", -50)
+        self.cold_violence_consecutive_threshold = cv_conf.get("consecutive_decrease_threshold", 3)
         self.cold_violence_duration_minutes = cv_conf.get("duration_minutes", 60)
         self.cold_violence_is_global = cv_conf.get("is_global", False)
         self.cold_violence_replies = cv_conf.get("replies", {
@@ -86,6 +89,7 @@ class FavourManagerTool(Star):
         
         self.pending_updates = {}
         self.cold_violence_users: Dict[str, datetime] = {} # Key: user_id or session_id:user_id
+        self.consecutive_decreases: Dict[str, int] = {} # 记录连续降低次数
 
     async def _init_storage(self):
         """初始化存储并迁移数据"""
@@ -175,12 +179,32 @@ class FavourManagerTool(Star):
         is_admin = await self._check_permission(event, PermLevel.OWNER) 
         
         base = self.admin_default_favour if (is_envoy or is_admin) else self.default_favour
-        return max(self.min_favour_value, min(self.max_favour_value, base))
+        return max(self.min_favour_value, min(self.max_val, base))
 
     def _get_cold_violence_key(self, user_id: str, session_id: Optional[str]) -> str:
         if self.cold_violence_is_global:
             return user_id
         return f"{session_id}:{user_id}" if session_id else user_id
+
+    async def _sort_records(self, event: AstrMessageEvent, records: List[FavourRecord]) -> List[FavourRecord]:
+        """根据配置对记录进行排序"""
+        if not records:
+            return []
+            
+        if self.group_sort_by == "favour":
+            return sorted(records, key=lambda x: x.favour, reverse=True)
+        elif self.group_sort_by == "userid":
+            return sorted(records, key=lambda x: x.user_id)
+        elif self.group_sort_by == "nickname":
+            enriched = []
+            for r in records:
+                name = await self._get_user_display_name(event, r.user_id)
+                enriched.append((name, r))
+            enriched.sort(key=lambda x: x[0].lower())
+            return [x[1] for x in enriched]
+        else:
+            # default: 按添加时间 (created_at) 排序，如果没有则按 id
+            return sorted(records, key=lambda x: x.created_at if x.created_at else datetime.min)
 
     async def _send_chunked_t2i(self, event: AstrMessageEvent, title: str, headers: List[str], rows: List[str], chunk_size: int = 200):
         """分块发送 T2I 图片"""
@@ -191,7 +215,7 @@ class FavourManagerTool(Star):
 
         for i in range(0, total, chunk_size):
             chunk = rows[i:i+chunk_size]
-            page_info = f"({i+1}-{min(i+chunk_size, total)}/{total})"
+            page_info = f"({i+1}-{min(i+chunk_size, total)}/{total})" if total > chunk_size else ""
             
             md_lines = [f"# {title} {page_info}", ""]
             md_lines.extend(headers)
@@ -267,8 +291,6 @@ class FavourManagerTool(Star):
                 
                 # 2. 关系表注入 (如果开启)
                 if self.enable_relationship_table:
-                    # 筛选出有关系的用户，排除当前用户（可选，但为了完整性可以保留或排除）
-                    # 这里只展示有明确 relationship 的记录
                     rel_rows = []
                     for r in records:
                         if r.relationship and r.user_id != user_id:
@@ -377,8 +399,7 @@ class FavourManagerTool(Star):
                 increase_min=self.favour_increase_min,
                 increase_max=self.favour_increase_max,
                 decrease_min=self.favour_decrease_min,
-                decrease_max=self.favour_decrease_max,
-                cold_violence_threshold=self.cold_violence_threshold
+                decrease_max=self.favour_decrease_max
             )
 
             req.system_prompt = f"{prompt_final}\n{req.system_prompt}".strip()
@@ -420,22 +441,18 @@ class FavourManagerTool(Star):
         if update_data['found']:
             self.pending_updates[msg_id] = update_data
         elif text and len(text.strip()) > 0:
-            # 如果有回复内容但没有识别到标签，输出警告
             logger.warning(f"LLM回复了内容但未识别到好感度标签 (MsgID: {msg_id})")
 
-    # 提高优先级到 10 (数字越小越早执行/优先级越高，确保在其他插件处理前移除标签)
     @filter.on_decorating_result(priority=10)
     async def update_data(self, event: AstrMessageEvent):
         if not hasattr(event, 'message_obj'): return
         msg_id = str(event.message_obj.message_id)
         data = self.pending_updates.pop(msg_id, None)
         
-        # 无论是否有数据更新，都要尝试清理标签，防止漏网之鱼
         res = event.get_result()
         new_chain = []
         for comp in res.chain:
             if isinstance(comp, Plain) and comp.text:
-                # 强化过滤逻辑，包括“持平”
                 t = self.favour_pattern.sub("", comp.text)
                 t = self.relationship_pattern.sub("", t)
                 if t.strip(): 
@@ -465,24 +482,30 @@ class FavourManagerTool(Star):
                 
             await self.db_manager.update_favour(user_id, session_id, new_fav, rel, uniq)
             
-            # 输出 Info 日志
             log_msg = f"用户 {user_id} (会话 {session_id}) 数据更新: 好感度 {old_fav}->{new_fav} (Δ{data['change']})"
             if data['rel']:
                 log_msg += f", 关系更新为 {rel} (唯一:{uniq})"
             logger.info(log_msg)
             
-            if self.enable_cold_violence and new_fav <= self.cold_violence_threshold and data['change'] < 0:
+            # 冷暴力逻辑：连续降低触发
+            if self.enable_cold_violence:
                 cv_key = self._get_cold_violence_key(user_id, session_id)
-                duration = timedelta(minutes=self.cold_violence_duration_minutes)
-                self.cold_violence_users[cv_key] = datetime.now() + duration
-                res.chain.append(Plain(f"\n{self.cold_violence_replies['on_trigger']}"))
-                logger.info(f"用户 {user_id} 触发冷暴力模式")
+                if data['change'] < 0:
+                    self.consecutive_decreases[cv_key] = self.consecutive_decreases.get(cv_key, 0) + 1
+                    if self.consecutive_decreases[cv_key] >= self.cold_violence_consecutive_threshold:
+                        duration = timedelta(minutes=self.cold_violence_duration_minutes)
+                        self.cold_violence_users[cv_key] = datetime.now() + duration
+                        res.chain.append(Plain(f"\n{self.cold_violence_replies['on_trigger']}"))
+                        logger.info(f"用户 {user_id} 连续降低好感度 {self.consecutive_decreases[cv_key]} 次，触发冷暴力模式")
+                        self.consecutive_decreases[cv_key] = 0 # 触发后重置
+                else:
+                    self.consecutive_decreases[cv_key] = 0 # 上升或持平则重置
+                    
         except Exception as e:
             logger.error(f"更新好感度数据失败: {str(e)}\n{traceback.format_exc()}")
 
     # ================= 1. 查询类型 =================
 
-    # 1.1 查询好感度 (单人，纯文本)
     @filter.command("查询好感度", alias={'查好感度', '好感度查询', '查看好感度', '好感度'})
     async def query_favour(self, event: AstrMessageEvent, target: str = ""):
         """查询自己或他人的好感度"""
@@ -499,10 +522,9 @@ class FavourManagerTool(Star):
         msg = f"🔍 用户：{name}\n🆔 ID：{target_uid}\n❤ 好感度：{fav}\n🔗 关系：{rel}{uniq}"
         yield event.plain_result(msg)
 
-    # 1.2 查询当前好感度 (本群，T2I表格)
     @filter.command("查询当前好感度", alias={'查当前好感度', '查询本群好感度', '查本群好感度', '查群好感度', '查询群好感度', '当前好感度', '本群好感度', '群好感度'})
-    async def query_current_session_favour(self, event: AstrMessageEvent):
-        """查询当前会话的所有好感度记录"""
+    async def query_current_session_favour(self, event: AstrMessageEvent, page: int = 1):
+        """查询当前会话的所有好感度记录 (支持分页)"""
         if self.is_global_favour:
             yield event.plain_result("当前为全局模式，此命令无效。请使用【查询全局好感度】。")
             return
@@ -514,21 +536,33 @@ class FavourManagerTool(Star):
             yield event.plain_result("当前会话暂无好感度记录。")
             return
             
+        records = await self._sort_records(event, records)
+        
+        page_size = 20
+        total_records = len(records)
+        total_pages = (total_records + page_size - 1) // page_size
+        if page < 1: page = 1
+        if page > total_pages and total_pages > 0: page = total_pages
+        
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_records = records[start_idx:end_idx]
+            
         headers = [
             "| 用户昵称 | 用户ID | 好感度 | 关系 | 唯一 |",
             "| :--- | :--- | :---: | :---: | :---: |"
         ]
         rows = []
-        for r in records:
+        for r in page_records:
             name = await self._get_user_display_name(event, r.user_id)
             name = name.replace("|", "\|").replace("\n", " ")
             rel = r.relationship or "无"
             uniq = "是" if r.is_unique else "否"
             rows.append(f"| {name} | {r.user_id} | {r.favour} | {rel} | {uniq} |")
             
-        await self._send_chunked_t2i(event, f"📊 当前会话好感度列表 (SID: {session_id})", headers, rows)
+        title = f"📊 当前会话好感度列表 (SID: {session_id}) - 第 {page}/{total_pages} 页"
+        await self._send_chunked_t2i(event, title, headers, rows)
 
-    # 1.3 查询全部好感度 (非全局，T2I表格，按会话分组，显示前5后5)
     @filter.command("查询全部好感度", alias={'查全部好感度', '查看全部好感度', '全部好感度'})
     async def query_all_sessions_favour(self, event: AstrMessageEvent):
         """查询所有非全局会话的好感度 (仅Bot管理员)"""
@@ -562,7 +596,7 @@ class FavourManagerTool(Star):
                 hidden_private_sessions += 1
                 continue
 
-            group_records.sort(key=lambda x: x.favour, reverse=True)
+            group_records = await self._sort_records(event, group_records)
             
             rows.append(f"\n## 会话: {sid} (共 {len(group_records)} 人)")
             rows.append(headers[0])
@@ -587,10 +621,9 @@ class FavourManagerTool(Star):
             
         await self._send_chunked_t2i(event, "📊 全部会话好感度概览", [], rows)
 
-    # 1.4 查询全局好感度 (T2I表格)
     @filter.command("查询全局好感度", alias={'全局好感度', '查全局好感度', '查看全局好感度', '全局好感度查询'})
-    async def query_global_favour(self, event: AstrMessageEvent):
-        """查询全局模式下的好感度 (仅Bot管理员)"""
+    async def query_global_favour(self, event: AstrMessageEvent, page: int = 1):
+        """查询全局模式下的好感度 (仅Bot管理员，支持分页)"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
             yield event.plain_result("权限不足！仅Bot管理员可用。")
             return
@@ -600,21 +633,33 @@ class FavourManagerTool(Star):
             yield event.plain_result("暂无全局好感度记录。")
             return
             
+        records = await self._sort_records(event, records)
+        
+        page_size = 20
+        total_records = len(records)
+        total_pages = (total_records + page_size - 1) // page_size
+        if page < 1: page = 1
+        if page > total_pages and total_pages > 0: page = total_pages
+        
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_records = records[start_idx:end_idx]
+            
         headers = [
             "| 用户ID | 好感度 | 关系 | 唯一 |",
             "| :--- | :---: | :---: | :---: |"
         ]
         rows = []
-        for r in records:
+        for r in page_records:
             rel = r.relationship or "无"
             uniq = "是" if r.is_unique else "否"
             rows.append(f"| {r.user_id} | {r.favour} | {rel} | {uniq} |")
             
-        await self._send_chunked_t2i(event, "📊 全局好感度记录", headers, rows)
+        title = f"📊 全局好感度记录 - 第 {page}/{total_pages} 页"
+        await self._send_chunked_t2i(event, title, headers, rows)
 
     # ================= 2. 修改类型 =================
 
-    # 2.1 修改好感度
     @filter.command("修改好感度")
     async def modify_favour(self, event: AstrMessageEvent, target: str, value: int):
         """修改好感度: /修改好感度 @用户 50 (群管理员)"""
@@ -636,7 +681,6 @@ class FavourManagerTool(Star):
             logger.error(f"修改好感度失败: {e}")
             yield event.plain_result("修改失败，请检查日志。")
 
-    # 2.2 修改关系
     @filter.command("修改关系")
     async def modify_relationship(self, event: AstrMessageEvent, target: str, rel_name: str, is_unique: int):
         """修改关系: /修改关系 @用户 挚友 1 (群主)"""
@@ -659,7 +703,6 @@ class FavourManagerTool(Star):
             logger.error(f"修改关系失败: {e}")
             yield event.plain_result("修改失败，请检查日志。")
 
-    # 2.3 解除关系
     @filter.command("解除关系")
     async def clear_relationship(self, event: AstrMessageEvent, target: str):
         """解除关系: /解除关系 @用户 (群主)"""
@@ -681,7 +724,6 @@ class FavourManagerTool(Star):
             logger.error(f"解除关系失败: {e}")
             yield event.plain_result("解除失败，请检查日志。")
 
-    # 2.4 全局修改/解除
     @filter.command("全局修改好感度")
     async def global_modify_favour(self, event: AstrMessageEvent, target: str, value: int):
         """全局修改好感度 (Bot管理员)"""
@@ -736,16 +778,9 @@ class FavourManagerTool(Star):
             logger.error(f"全局解除关系失败: {e}")
             yield event.plain_result("解除失败，请检查日志。")
 
-    # 2.5 跨会话修改
     @filter.command("跨会话修改")
     async def cross_session_modify(self, event: AstrMessageEvent, target_sid: str, operation: str, target_uid: str, arg1: str = "", arg2: str = ""):
-        """
-        跨会话修改数据 (Bot管理员)
-        用法:
-        /跨会话修改 <sid> 修改好感度 <uid> <数值>
-        /跨会话修改 <sid> 修改关系 <uid> <关系名> <1/0>
-        /跨会话修改 <sid> 解除关系 <uid>
-        """
+        """跨会话修改数据 (Bot管理员)"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
             yield event.plain_result("权限不足！仅Bot管理员可用。")
             return
@@ -786,7 +821,109 @@ class FavourManagerTool(Star):
             logger.error(f"跨会话修改失败: {e}")
             yield event.plain_result("操作失败，请检查日志。")
 
-    # ================= 3. 帮助类型 =================
+    # ================= 3. 清空类型 =================
+
+    @filter.command("清空好感度")
+    async def clear_user_favour(self, event: AstrMessageEvent, target: str):
+        """清空指定用户好感度 (群主)"""
+        if not await self._check_permission(event, PermLevel.OWNER):
+            yield event.plain_result("权限不足！需要群主及以上权限。")
+            return
+            
+        uid = self._get_target_uid(event, target)
+        if not uid:
+            yield event.plain_result("未找到用户，请使用 @ 或输入 ID。")
+            return
+            
+        yield event.plain_result(f"⚠️ 警告：即将清空用户 {uid} 在当前会话的好感度数据。\n请在 30 秒内回复「确认清空」以继续，回复其他内容取消。")
+        
+        @session_waiter(timeout=30, record_history_chains=False)
+        async def confirm_waiter(controller: SessionController, evt: AstrMessageEvent):
+            if evt.message_str.strip() == "确认清空":
+                sid = self._get_session_id(evt)
+                record = await self.db_manager.get_favour(uid, sid)
+                if record:
+                    backup_file = await self.db_manager.backup_data([record], f"backup_user_{uid}_{sid}")
+                    await self.db_manager.delete_favour(uid, sid)
+                    await evt.send(evt.plain_result(f"✅ 已清空用户 {uid} 的好感度数据。\n备份文件已保存至: {backup_file}"))
+                    logger.info(f"管理员 {evt.get_sender_id()} 清空了用户 {uid} 在会话 {sid} 的好感度")
+                else:
+                    await evt.send(evt.plain_result("该用户在当前会话无好感度记录。"))
+            else:
+                await evt.send(evt.plain_result("已取消清空操作。"))
+            controller.stop()
+            
+        try:
+            await confirm_waiter(event)
+        except TimeoutError:
+            yield event.plain_result("操作超时，已取消清空。")
+        finally:
+            event.stop_event()
+
+    @filter.command("清空当前好感度")
+    async def clear_current_favour(self, event: AstrMessageEvent):
+        """清空当前会话好感度 (群主)"""
+        if not await self._check_permission(event, PermLevel.OWNER):
+            yield event.plain_result("权限不足！需要群主及以上权限。")
+            return
+            
+        sid = self._get_session_id(event)
+        yield event.plain_result(f"⚠️ 警告：即将清空当前会话 ({sid}) 的所有好感度数据。\n请在 30 秒内回复「确认清空」以继续，回复其他内容取消。")
+        
+        @session_waiter(timeout=30, record_history_chains=False)
+        async def confirm_waiter(controller: SessionController, evt: AstrMessageEvent):
+            if evt.message_str.strip() == "确认清空":
+                records = await self.db_manager.get_all_in_session(sid)
+                if records:
+                    backup_file = await self.db_manager.backup_data(records, f"backup_session_{sid}")
+                    await self.db_manager.clear_session(sid)
+                    await evt.send(evt.plain_result(f"✅ 已清空当前会话的所有好感度数据。\n备份文件已保存至: {backup_file}"))
+                    logger.info(f"管理员 {evt.get_sender_id()} 清空了会话 {sid} 的所有好感度")
+                else:
+                    await evt.send(evt.plain_result("当前会话无好感度记录。"))
+            else:
+                await evt.send(evt.plain_result("已取消清空操作。"))
+            controller.stop()
+            
+        try:
+            await confirm_waiter(event)
+        except TimeoutError:
+            yield event.plain_result("操作超时，已取消清空。")
+        finally:
+            event.stop_event()
+
+    @filter.command("清空全局好感度")
+    async def clear_all_favour(self, event: AstrMessageEvent):
+        """清空所有好感度 (Bot管理员)"""
+        if not await self._check_permission(event, PermLevel.SUPERUSER):
+            yield event.plain_result("权限不足！仅Bot管理员可用。")
+            return
+            
+        yield event.plain_result(f"🚨 极度危险：即将清空数据库中【所有】好感度数据！\n请在 30 秒内回复「确认清空所有数据」以继续，回复其他内容取消。")
+        
+        @session_waiter(timeout=30, record_history_chains=False)
+        async def confirm_waiter(controller: SessionController, evt: AstrMessageEvent):
+            if evt.message_str.strip() == "确认清空所有数据":
+                records = await self.db_manager.get_global_records() + await self.db_manager.get_non_global_records()
+                if records:
+                    backup_file = await self.db_manager.backup_data(records, "backup_all_database")
+                    await self.db_manager.clear_all()
+                    await evt.send(evt.plain_result(f"✅ 已清空所有好感度数据。\n备份文件已保存至: {backup_file}"))
+                    logger.warning(f"Bot管理员 {evt.get_sender_id()} 清空了所有好感度数据！")
+                else:
+                    await evt.send(evt.plain_result("数据库中无好感度记录。"))
+            else:
+                await evt.send(evt.plain_result("已取消清空操作。"))
+            controller.stop()
+            
+        try:
+            await confirm_waiter(event)
+        except TimeoutError:
+            yield event.plain_result("操作超时，已取消清空。")
+        finally:
+            event.stop_event()
+
+    # ================= 4. 帮助类型 =================
 
     @filter.command("好感度帮助", alias={'查看好感度帮助'})
     async def help_menu(self, event: AstrMessageEvent):
@@ -799,7 +936,7 @@ class FavourManagerTool(Star):
         
         msg.append("\n[通用命令]")
         msg.append("- 查询好感度 [@用户]")
-        msg.append("- 查询当前好感度")
+        msg.append("- 查询当前好感度 [页码]")
         msg.append("- 好感度指令帮助")
         
         if is_admin or is_superuser:
@@ -810,15 +947,18 @@ class FavourManagerTool(Star):
             msg.append("\n[群主命令]")
             msg.append("- 修改关系 @用户 <关系名> <1/0>")
             msg.append("- 解除关系 @用户")
+            msg.append("- 清空好感度 @用户")
+            msg.append("- 清空当前好感度")
             
         if is_superuser:
             msg.append("\n[Bot管理员命令]")
             msg.append("- 查询全部好感度")
-            msg.append("- 查询全局好感度")
+            msg.append("- 查询全局好感度 [页码]")
             msg.append("- 全局修改好感度 @用户 <数值>")
             msg.append("- 全局修改关系 @用户 <关系名> <1/0>")
             msg.append("- 全局解除关系 @用户")
             msg.append("- 跨会话修改 <sid> <操作> ...")
+            msg.append("- 清空全局好感度")
             
         yield event.plain_result("\n".join(msg))
 
@@ -829,8 +969,9 @@ class FavourManagerTool(Star):
 
 1. 查询好感度
    用法: /查询好感度 [@用户]
-   示例: /查询好感度
    示例: /查询好感度 @糯米茨
+   用法: /查询当前好感度 [页码]
+   示例: /查询当前好感度 2
 
 2. 修改好感度 (管理员)
    用法: /修改好感度 @用户 <数值>
@@ -840,11 +981,12 @@ class FavourManagerTool(Star):
    用法: /修改关系 @用户 <关系名> <1/0>
    说明: 1代表唯一关系(如恋人)，0代表不唯一(如朋友)
    示例: /修改关系 @糯米茨 挚友 0
-   示例: /修改关系 @小林 恋人 1
 
-4. 解除关系 (群主)
-   用法: /解除关系 @用户
-   示例: /解除关系 @糯米茨
+4. 清空操作 (群主/Bot管理员)
+   用法: /清空好感度 @用户
+   用法: /清空当前好感度
+   用法: /清空全局好感度
+   说明: 清空操作需要二次确认，并会自动备份数据。
 
 5. 全局操作 (Bot管理员)
    示例: /全局修改好感度 @糯米茨 100
