@@ -1,11 +1,4 @@
 {
-  "allow_telemetry": {
-    "description": "是否允许发送匿名统计数据",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，插件会在启动时向开发者站点发送匿名的实例ID，仅用于统计插件使用人数。感谢您的支持！",
-    "obvious_hint": true
-  },
   "favour_mode": {
     "description": "好感度判定模式",
     "type": "string",
