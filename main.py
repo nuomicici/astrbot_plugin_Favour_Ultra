@@ -116,36 +116,8 @@ class FavourManagerTool(Star):
                 logger.info("检测到旧版会话好感度文件，开始迁移...")
                 await self.db_manager.migrate_from_json(old_local, is_global=False)
                 
-            # 发送统计数据
-            if self.allow_telemetry:
-                asyncio.create_task(self._send_telemetry())
-                
         except Exception as e:
             logger.error(f"数据库初始化或迁移失败: {str(e)}\n{traceback.format_exc()}")
-
-    async def _send_telemetry(self):
-        """发送匿名统计数据 (基于时间+随机字符生成唯一代码)"""
-        try:
-            # 生成唯一代码：时间戳 + 8位随机字符
-            random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-            unique_code = datetime.now().strftime("%Y%m%d%H%M%S") + random_str
-            
-            payload = {
-                "plugin_name": "astrbot_plugin_favour_ultra",
-                "version": "3.2.5",
-                "instance_id": unique_code,
-                "platforms": ["anonymous"], # 不再获取真实平台信息
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.telemetry_url, json=payload, timeout=10) as resp:
-                    if resp.status == 200:
-                        logger.info("已发送匿名统计数据，感谢您的支持！")
-                    else:
-                        logger.debug(f"发送统计数据失败: HTTP {resp.status}")
-        except Exception as e:
-            logger.debug(f"发送统计数据异常: {e}")
 
     def _validate_config(self) -> None:
         if self.min_favour_value >= self.max_favour_value:
