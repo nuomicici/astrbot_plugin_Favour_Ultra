@@ -25,7 +25,6 @@ from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourDBManager, FavourRecord
 
-@register("favour_manager_ultra", "Author", "好感度与关系管理插件-终极版", "1.0.0")
 class FavourManagerTool(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -81,13 +80,14 @@ class FavourManagerTool(Star):
         # 异步初始化数据库和迁移数据
         asyncio.create_task(self._init_storage())
 
-        # 正则表达式 (修改：完美清除多余的空格和换行符)
+        # 正则表达式
+        # 仅匹配插件约定的完整日志标签，避免误删普通文本中带方括号的内容
         self.favour_pattern = re.compile(
-            r'[ \t]*[\[［][^\[\]［］]*?(?:好.*?感|好.*?度|感.*?度)[^\[\]［］]*?[\]］][ \t]*\n?', 
-            re.DOTALL | re.IGNORECASE
+            r'[\[［]\s*好感度\s*(上升|降低)\s*[:：]\s*(\d+)\s*[\]］]|[\[［]\s*好感度\s*持平\s*[\]］]',
+            re.IGNORECASE
         )
         self.relationship_pattern = re.compile(
-            r'[ \t]*[\[［]\s*用户申请确认关系\s*[:：]\s*(.*?)\s*[:：]\s*(true|false)(?:\s*[:：]\s*(true|false))?\s*[\]］][ \t]*\n?', 
+            r'[\[［]\s*用户申请确认关系\s*[:：]\s*(.*?)\s*[:：]\s*(true|false)(?:\s*[:：]\s*(true|false))?\s*[\]］]',
             re.IGNORECASE
         )
         
@@ -322,7 +322,7 @@ class FavourManagerTool(Star):
                     if rel_rows:
                         relationship_table_str = "\n当前会话中其他已建立关系的用户:\n" + "\n".join(rel_rows)
 
-            # 根据模式选择 Prompt
+# 根据模式选择 Prompt
             mode_instruction = ""
             if self.favour_mode == "galgame":
                 mode_instruction = (
@@ -444,20 +444,22 @@ class FavourManagerTool(Star):
         
         update_data = {'change': 0, 'rel': None, 'unique': None, 'found': False}
         
-        matches = self.favour_pattern.findall(text)
-        for m in matches:
-            val = 0
-            num = re.search(r'(\d+)', m)
-            if num: val = int(num.group(1))
-            
-            if '降低' in m: 
+        for match in self.favour_pattern.finditer(text):
+            matched_text = match.group(0)
+            direction = match.group(1)
+            value_text = match.group(2)
+
+            if '持平' in matched_text:
+                update_data['change'] = 0
+                update_data['found'] = True
+                continue
+
+            val = int(value_text) if value_text else 0
+            if direction == '降低':
                 update_data['change'] = -val
                 update_data['found'] = True
-            elif '上升' in m: 
+            elif direction == '上升':
                 update_data['change'] = val
-                update_data['found'] = True
-            elif '持平' in m:
-                update_data['change'] = 0
                 update_data['found'] = True
         
         rel_m = self.relationship_pattern.findall(text)
@@ -485,9 +487,7 @@ class FavourManagerTool(Star):
             if isinstance(comp, Plain) and comp.text:
                 t = self.favour_pattern.sub("", comp.text)
                 t = self.relationship_pattern.sub("", t)
-                # 配合正则修改，彻底清理标签留下的首尾空白
-                t = t.strip()
-                if t: 
+                if t.strip(): 
                     new_chain.append(Plain(t))
             else:
                 new_chain.append(comp)
