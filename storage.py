@@ -3,7 +3,7 @@ import json
 import asyncio
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiofiles import open as aio_open
 from aiofiles.os import path as aio_path
 from sqlmodel import SQLModel, Field, select, delete, update
@@ -26,6 +26,8 @@ class FavourRecord(SQLModel, table=True):
     is_unique: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+    last_interaction: datetime = Field(default_factory=datetime.now)  # 最后互动时间，用于衰减
+
 
 class FavourDBManager:
     """基于SQLite的好感度数据库管理器"""
@@ -63,16 +65,19 @@ class FavourDBManager:
                     if not table_exists:
                         await conn.run_sync(SQLModel.metadata.create_all)
                     else:
-                        # 检查是否缺少 created_at 字段 (数据库升级逻辑)
+                        # 检查并添加缺失的字段
                         result = await conn.execute(text("PRAGMA table_info(favour_records)"))
                         columns = [row[1] for row in result.fetchall()]
                         if "created_at" not in columns:
                             logger.info("正在升级数据库：添加 created_at 字段...")
-                            # SQLite ALTER TABLE ADD COLUMN 不能使用 CURRENT_TIMESTAMP 作为默认值
                             await conn.execute(text("ALTER TABLE favour_records ADD COLUMN created_at DATETIME"))
-                            # 将旧数据的 created_at 设置为当前的 updated_at
                             await conn.execute(text("UPDATE favour_records SET created_at = updated_at WHERE created_at IS NULL"))
-                            logger.info("数据库升级完成。")
+                            logger.info("数据库升级完成（created_at）。")
+                        if "last_interaction" not in columns:
+                            logger.info("正在升级数据库：添加 last_interaction 字段...")
+                            await conn.execute(text("ALTER TABLE favour_records ADD COLUMN last_interaction DATETIME"))
+                            await conn.execute(text("UPDATE favour_records SET last_interaction = updated_at WHERE last_interaction IS NULL"))
+                            logger.info("数据库升级完成（last_interaction）。")
 
                 self._initialized = True
                 logger.info(f"好感度数据库已初始化: {self.db_path}")
@@ -158,6 +163,7 @@ class FavourDBManager:
                 d = r.dict()
                 d['created_at'] = d['created_at'].isoformat() if d.get('created_at') else None
                 d['updated_at'] = d['updated_at'].isoformat() if d.get('updated_at') else None
+                d['last_interaction'] = d['last_interaction'].isoformat() if d.get('last_interaction') else None
                 data_to_save.append(d)
                 
             async with aio_open(filename, "w", encoding="utf-8") as f:
@@ -185,7 +191,8 @@ class FavourDBManager:
         session_id: Optional[str], 
         favour: Optional[int] = None, 
         relationship: Optional[str] = None, 
-        is_unique: Optional[bool] = None
+        is_unique: Optional[bool] = None,
+        touch_interaction: bool = True  # 是否刷新最后互动时间
     ) -> bool:
         """更新好感度记录"""
         await self.init_db()
@@ -203,6 +210,7 @@ class FavourDBManager:
                 result = await session.execute(stmt)
                 record = result.scalars().first()
 
+                now = datetime.now()
                 if not record:
                     init_favour = max(self.min_val, min(self.max_val, favour)) if favour is not None else 0
                     record = FavourRecord(
@@ -210,7 +218,8 @@ class FavourDBManager:
                         session_id=sid,
                         favour=init_favour,
                         relationship=relationship or "",
-                        is_unique=is_unique if is_unique is not None else False
+                        is_unique=is_unique if is_unique is not None else False,
+                        last_interaction=now
                     )
                     session.add(record)
                 else:
@@ -220,7 +229,9 @@ class FavourDBManager:
                         record.relationship = relationship
                     if is_unique is not None:
                         record.is_unique = is_unique
-                    record.updated_at = datetime.now()
+                    record.updated_at = now
+                    if touch_interaction:
+                        record.last_interaction = now
                     session.add(record)
                 
                 await session.commit()
@@ -243,7 +254,6 @@ class FavourDBManager:
             
         try:
             async with self.async_session() as session:
-                # 构建更新字典
                 values = {"updated_at": datetime.now()}
                 if favour is not None:
                     values["favour"] = max(self.min_val, min(self.max_val, favour))
@@ -334,3 +344,87 @@ class FavourDBManager:
         except Exception as e:
             logger.error(f"清空所有记录失败: {str(e)}")
             return False
+
+    async def get_decay_candidates(
+        self, 
+        inactive_days: int = None, 
+        decay_config: dict = None
+    ) -> List[Tuple[FavourRecord, int, int]]:
+        """
+        获取需要进行衰减的记录。
+        
+        线性模式：使用 inactive_days 作为统一阈值。
+        分级模式：使用 decay_config['advanced_rules'] 按好感度区间匹配。
+        
+        Returns: List of (record, inactive_days_for_this_record, decay_amount)
+        """
+        await self.init_db()
+        results: List[Tuple[FavourRecord, int, int]] = []
+        
+        mode = decay_config.get("mode", "linear") if decay_config else "linear"
+        floor_favour = decay_config.get("floor_favour") if decay_config else None
+        
+        try:
+            async with self.async_session() as session:
+                # 获取所有好感度高于 min_val 的记录
+                stmt = select(FavourRecord).where(FavourRecord.favour > self.min_val)
+                result = await session.execute(stmt)
+                all_records = list(result.scalars().all())
+            
+            for record in all_records:
+                if mode == "linear":
+                    if inactive_days is None:
+                        inactive_days = 7
+                    cutoff = datetime.now() - timedelta(days=inactive_days)
+                    if record.last_interaction and record.last_interaction < cutoff:
+                        # 检查底线
+                        eff_floor = floor_favour if floor_favour is not None else self.min_val
+                        if record.favour > eff_floor:
+                            decay_amt = decay_config.get("decay_amount", 5) if decay_config else 5
+                            results.append((record, inactive_days, decay_amt))
+                else:
+                    # 分级模式：按 advanced_rules 匹配
+                    rules = decay_config.get("advanced_rules", []) if decay_config else []
+                    if not rules:
+                        continue
+                    # 按 min_favour 降序排列以优先匹配高区间
+                    rules_sorted = sorted(rules, key=lambda r: r.get("min_favour", 0), reverse=True)
+                    matched_rule = None
+                    for rule in rules_sorted:
+                        r_min = rule.get("min_favour", -999)
+                        r_max = rule.get("max_favour", 999)
+                        if r_min <= record.favour <= r_max:
+                            matched_rule = rule
+                            break
+                    
+                    if matched_rule:
+                        days = matched_rule.get("inactive_days", 7)
+                        cutoff = datetime.now() - timedelta(days=days)
+                        if record.last_interaction and record.last_interaction < cutoff:
+                            eff_floor = matched_rule.get("floor", floor_favour)
+                            if eff_floor is None:
+                                eff_floor = floor_favour if floor_favour is not None else self.min_val
+                            if record.favour > eff_floor:
+                                decay_amt = matched_rule.get("decay_amount", 5)
+                                results.append((record, days, decay_amt))
+        except Exception as e:
+            logger.error(f"查询衰减候选记录失败: {e}")
+        
+        return results
+
+    async def apply_decay(self, user_id: str, session_id: str, decay_amount: int, floor: int = None) -> Optional[int]:
+        """
+        对指定记录应用衰减，返回衰减后的好感度值。
+        若已达到底线则不再衰减，返回 None 表示无变化。
+        """
+        record = await self.get_favour(user_id, session_id)
+        if not record:
+            return None
+        
+        eff_floor = floor if floor is not None else self.min_val
+        if record.favour <= eff_floor:
+            return None
+        
+        new_favour = max(eff_floor, record.favour - decay_amount)
+        await self.update_favour(user_id, session_id, favour=new_favour, touch_interaction=False)
+        return new_favour
