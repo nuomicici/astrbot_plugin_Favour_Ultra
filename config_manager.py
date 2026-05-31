@@ -140,8 +140,20 @@ class PluginConfigManager:
         self.config_path = self.plugin_data_dir / CONFIG_FILENAME
 
         # 框架旧配置路径（用于迁移）
+        # 兼容不同大小写：框架在不同版本/平台下可能生成不同大小写的文件名
         if context_data_dir:
-            self.old_config_path = Path(context_data_dir) / "config" / "astrbot_plugin_Favour_Ultra_config.json"
+            config_dir = Path(context_data_dir) / "config"
+            candidates = [
+                config_dir / "astrbot_plugin_Favour_Ultra_config.json",
+                config_dir / "astrbot_plugin_favour_ultra_config.json",
+                config_dir / "astrbot_plugin_Favour_Ultra-main_config.json",
+                config_dir / "astrbot_plugin_favour_ultra-main_config.json",
+            ]
+            self.old_config_path = None
+            for candidate in candidates:
+                if candidate.exists():
+                    self.old_config_path = candidate
+                    break
         else:
             self.old_config_path = None
 
@@ -173,7 +185,7 @@ class PluginConfigManager:
         if self.config_path.exists():
             # 已有配置文件，直接加载
             try:
-                with open(self.config_path, "r", encoding="utf-8") as f:
+                with open(self.config_path, "r", encoding="utf-8-sig") as f:
                     loaded = json.load(f)
                 loaded = self._normalize_config_after_load(loaded)
                 self._config = self._deep_merge(DEFAULT_CONFIG.copy(), loaded)
@@ -189,7 +201,7 @@ class PluginConfigManager:
         # 配置文件不存在 → 尝试迁移旧版框架配置（仅首次安装时）
         if self.old_config_path and self.old_config_path.exists():
             try:
-                with open(self.old_config_path, "r", encoding="utf-8") as f:
+                with open(self.old_config_path, "r", encoding="utf-8-sig") as f:
                     old_config = json.load(f)
                 logger.info(f"检测到旧版框架配置，正在迁移: {self.old_config_path}")
                 self._config = self._migrate_old_config(old_config)
