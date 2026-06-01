@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>好感度插件 · 配置中心</title>
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<div id="app">
+  <div class="topbar">
+    <h2>⭐ 好感度 · 配置中心</h2>
+    <span class="badge ok" id="status">加载中...</span>
+    <button class="btn" id="btn-save">💾 保存</button>
+  </div>
+  <div class="tabs" id="tabs">
+    <button class="tab on" data-t="basic">基础</button>
+    <button class="tab" data-t="levels">分级</button>
+    <button class="tab" data-t="decay">衰减</button>
+    <button class="tab" data-t="active">搭话</button>
+    <button class="tab" data-t="perm">权限</button>
+    <button class="tab" data-t="adv">高级</button>
+    <button class="tab" data-t="cold">冷暴力</button>
+  </div>
+  <div id="body" class="body"></div>
+</div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,170 +1,170 @@
 {
+  "_upgrade_notice": {
+    "description": "版本升级通知",
+    "type": "text",
+    "default": "本插件已升级至新版！所有配置已迁移至 WebUI 的「插件管理 → 插件详情 → Pages → 配置中心」。当前页面（旧版配置）仅用于数据迁移，修改无效。请前往 Pages 配置中心进行所有设置。",
+    "obvious_hint": true,
+    "hint": "本字段仅供展示，修改不会生效。"
+  },
+  "_rollback_url": {
+    "description": "旧版回退地址（如新版运行出错可手动安装旧版）",
+    "type": "string",
+    "default": "https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/tree/older",
+    "obvious_hint": true,
+    "hint": "如果新版插件出现错误，可以前往此 GitHub 分支下载旧版本手动回退。删除新版本点击插件页面右下角加号安装即可。"
+  },
+   "_up_notice": {
+    "description": "配置文件目录",
+    "type": "text",
+    "default": "配置文件保存于\"/data/plugin_data/astrbot_plugin_favour_ultra/\"，默认配置位于\"data/plugins/astrbot_plugin_Favour_Ultra/config_manager.py\"",
+    "obvious_hint": true,
+    "hint": "旧版本分级规则失效，请务必前往配置页查看是否需要更改！"
+  },
   "favour_mode": {
-    "description": "好感度判定模式",
+    "description": "【旧版迁移兼容】好感度判定模式 — 此页面仅供迁移数据，修改无效",
     "type": "string",
     "default": "galgame",
-    "options": [
-      "galgame",
-      "realistic"
-    ],
-    "hint": "Galgame模式：好感度容易提升，性格宽容。\n拟真模式：好感度提升严格，性格复杂，难以取悦。"
+    "options": ["galgame", "realistic"],
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。实际配置请前往「插件管理 → 插件详情 → Pages → 配置中心」。"
   },
   "is_global_favour": {
-    "description": "是否使用全局好感度模式",
+    "description": "【旧版迁移兼容】全局好感度 — 此页面仅供迁移数据，修改无效",
     "type": "bool",
     "default": false,
-    "hint": "开启时所有对话共享好感度；关闭时每个对话独立计算好感度。\n目前开启全局无法同步独立会话好感（防止刷分）。"
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。"
   },
   "group_sort_by": {
-    "description": "群组好感度排序方式",
+    "description": "【旧版迁移兼容】排序方式 — 此页面仅供迁移数据，修改无效",
     "type": "string",
     "default": "default",
-    "options": [
-      "default",
-      "favour",
-      "nickname",
-      "userid"
-    ],
-    "hint": "default: 按添加时间排序\nfavour: 按好感度从高到低排序\nnickname: 按昵称A-Z排序\nuserid: 按用户ID排序"
+    "options": ["default", "favour", "nickname", "userid"],
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。"
   },
   "enable_cold_violence": {
-    "description": "是否启用冷暴力模式",
+    "description": "【旧版迁移兼容】启用冷暴力 — 此页面仅供迁移数据，修改无效",
     "type": "bool",
     "default": true,
-    "hint": "开启后，当好感度连续降低达到指定次数时触发冷暴力（拒绝回复/敷衍）。"
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。"
   },
   "enable_relationship_table": {
-    "description": "是否向LLM注入当前会话关系表",
+    "description": "【旧版迁移兼容】注入关系表 — 此页面仅供迁移数据，修改无效",
     "type": "bool",
     "default": true,
-    "hint": "开启后，会在Prompt中告知LLM当前群聊中其他已建立关系的用户（如：用户123|挚友|90）。有助于LLM处理复杂的人际关系。"
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。"
   },
   "min_favour_value": {
-    "description": "好感度数值下限（例如 -100）",
+    "description": "【旧版迁移兼容】好感度下限 — 此页面仅供迁移数据，修改无效",
     "type": "int",
     "default": -100,
-    "hint": "修改后记得把好感度规则也改一下！"
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。"
   },
   "max_favour_value": {
-    "description": "好感度数值上限（例如 100）",
+    "description": "【旧版迁移兼容】好感度上限 — 此页面仅供迁移数据，修改无效",
     "type": "int",
     "default": 100,
-    "hint": "修改后记得把好感度规则也改一下！"
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。"
   },
   "default_favour": {
-    "description": "普通用户初始好感度",
+    "description": "【旧版迁移兼容】初始好感度 — 此页面仅供迁移数据，修改无效",
     "type": "int",
     "default": 0,
-    "hint": "新用户首次交互时的初始好感度值。别超出自定义的范围哦！"
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。"
   },
   "favour_rule_prompt": {
-    "description": "自定义好感度规则提示词",
+    "description": "【旧版迁移兼容】好感度规则文本 — 此页面仅供迁移数据，修改无效",
     "type": "text",
-    "default": "- 好感度等级：根据好感度数值的高低，共分为七个等级。\n - [-100~-91]：`极度厌恶`。此阶等级中，无论用户说什么内容，你都会感到十分嫌弃。如果没有其他人请求，该等级用户无法提升好感度。\n - [-90~-51]：`厌恶`。此等级中，你对用户抱有很强烈的抗拒感，你会想尽办法不想与其发生交流。此该等级用户可以通过正向互动稍微恢复好感度。\n - [-50~-1]：`反感`。此等级中，你对用户的行为感到反感，会明显表现出自己对TA没有好感。此等级用户可以正常通过对话进行好感度增减。\n - [0~49]：`普通`。此等级中，你对用户的态度为“普通朋友”。你对于用户的态度很平淡，不会主动表现出喜爱或者厌恶情绪。但是你不喜欢对反缺少分寸感的发言（如摸摸头、亲亲等），如果出现，你会感到反感。\n - [50~89]：`喜欢`。此等级中，你对于用户有一定的喜欢。用户的言语、动作主要不是特别冒犯，都会让你感到喜欢。此等级用户可以正常通过对话进行好感度增减。\n - [90~99]：`亲密`。此等级中，你几乎不会对用户的行为感到不适。用户做什么都会引起你的“喜欢”。（除非太过强硬，明显违背你的意愿）此等级用户可以正常通过对话进行好感度增减。\n - [100]：`挚爱`。此等级为最高等级。你对用户抱有极深的感情，极为重视用户的每一句话。",
-    "hint": "补充好感度规则。LLM在不同好感度下对用户的反应（默认配置亲测好用，可参考此格式修改）。"
+    "default": "- 好感度等级：根据好感度数值的高低，共分为七个等级。\n - [-100~-91]：`极度厌恶`。\n - [-90~-51]：`厌恶`。\n - [-50~-1]：`反感`。\n - [0~49]：`普通`。\n - [50~89]：`喜欢`。\n - [90~99]：`亲密`。\n - [100]：`挚爱`。",
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。新版使用「好感度分级」独立配置。"
   },
   "advanced_config": {
-    "description": "高级配置",
+    "description": "【旧版迁移兼容】高级配置 — 此页面仅供迁移数据，修改无效",
     "type": "object",
-    "hint": "包含数值波动范围、管理员设置、黑白名单等高级选项。",
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。",
     "items": {
       "admin_default_favour": {
-        "description": "框架管理员/特使初始好感度",
+        "description": "【旧版迁移兼容】管理员初始好感度",
         "type": "int",
-        "default": 50,
-        "hint": "好感度特使和Bot管理员的初始好感度值。"
+        "default": 50
       },
       "favour_envoys": {
-        "description": "好感度特使用户ID列表",
+        "description": "【旧版迁移兼容】好感度特使ID列表",
         "type": "list",
-        "default": [],
-        "hint": "列表中的用户将获得与管理员相同的初始好感度，一行一个，回车确认。"
+        "default": []
       },
       "favour_increase_min": {
-        "description": "好感度上升最小值",
+        "description": "【旧版迁移兼容】上升最小值",
         "type": "int",
-        "default": 1,
-        "hint": "LLM返回上升时的最小幅度。"
+        "default": 1
       },
       "favour_increase_max": {
-        "description": "好感度上升最大值",
+        "description": "【旧版迁移兼容】上升最大值",
         "type": "int",
-        "default": 3,
-        "hint": "LLM返回上升时的最大幅度。"
+        "default": 3
       },
       "favour_decrease_min": {
-        "description": "好感度下降最小值（绝对值）",
+        "description": "【旧版迁移兼容】下降最小值",
         "type": "int",
-        "default": 1,
-        "hint": "LLM返回下降时的最小幅度。"
+        "default": 1
       },
       "favour_decrease_max": {
-        "description": "好感度下降最大值（绝对值）",
+        "description": "【旧版迁移兼容】下降最大值",
         "type": "int",
-        "default": 5,
-        "hint": "LLM返回下降时的最大幅度。"
+        "default": 5
       },
       "level_threshold": {
-        "description": "高等级成员的群等级阈值",
+        "description": "【旧版迁移兼容】群等级阈值",
         "type": "int",
-        "default": 50,
-        "hint": "群成员等级达到此值时视为HIGH权限。"
+        "default": 50
       },
       "blocked_sessions": {
-        "description": "会话黑名单",
+        "description": "【旧版迁移兼容】会话黑名单",
         "type": "list",
-        "default": [],
-        "hint": "在此列表中的会话ID将不启用好感度系统。"
+        "default": []
       },
       "allowed_sessions": {
-        "description": "会话白名单",
+        "description": "【旧版迁移兼容】会话白名单",
         "type": "list",
-        "default": [],
-        "hint": "如果此列表不为空，则只有在此列表中的会话才启用好感度系统。"
+        "default": []
       }
     }
   },
   "cold_violence_config": {
-    "description": "冷暴力模式配置",
+    "description": "【旧版迁移兼容】冷暴力配置 — 此页面仅供迁移数据，修改无效",
     "type": "object",
-    "hint": "配置当好感度连续降低时触发的冷暴力行为。",
+    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。",
     "items": {
       "consecutive_decrease_threshold": {
-        "description": "连续降低触发次数",
+        "description": "【旧版迁移兼容】连续降低触发次数",
         "type": "int",
-        "default": 3,
-        "hint": "当好感度连续降低达到此次数时，将触发冷暴力模式。"
+        "default": 3
       },
       "duration_minutes": {
-        "description": "持续时间（分钟）",
+        "description": "【旧版迁移兼容】持续时间（分钟）",
         "type": "int",
-        "default": 60,
-        "hint": "触发冷暴力后，需要经过这段时间才能恢复正常对话。"
+        "default": 60
       },
       "is_global": {
-        "description": "是否全局生效",
+        "description": "【旧版迁移兼容】是否全局生效",
         "type": "bool",
-        "default": false,
-        "hint": "开启后，用户在一个群触发冷暴力，在所有群都会被冷暴力。"
+        "default": false
       },
       "replies": {
         "type": "object",
-        "description": "自定义回复",
-        "hint": "自定义冷暴力期间的自动回复。{time_str} 为剩余时间。",
+        "description": "【旧版迁移兼容】自定义回复",
         "items": {
           "on_trigger": {
             "type": "string",
-            "description": "触发时附加在回复末尾的消息",
+            "description": "【旧版迁移兼容】触发附加消息",
             "default": "......（我不想理你了。）"
           },
           "on_message": {
             "type": "string",
-            "description": "拦截用户消息时的自动回复",
+            "description": "【旧版迁移兼容】拦截时回复",
             "default": "[自动回复]不想理你,{time_str}后再找我"
           },
           "on_query": {
             "type": "string",
-            "description": "用户查询好感度时的回复",
+            "description": "【旧版迁移兼容】查询时回复",
             "default": "冷暴力呢，看什么看，{time_str}之后再找我说话"
           }
         }
