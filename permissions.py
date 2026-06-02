@@ -1,8 +1,9 @@
 # permissions.py
 import traceback
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from astrbot.api import logger
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+if TYPE_CHECKING:
+    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
 class PermLevel:
     """权限级别枚举类"""
@@ -48,7 +49,7 @@ class PermissionManager:
         return cls._instance
 
     async def get_perm_level(
-        self, event: AiocqhttpMessageEvent, user_id: str | int
+        self, event: 'AiocqhttpMessageEvent', user_id: str | int
     ) -> int:
         """获取用户在群内的权限级别"""
         try:

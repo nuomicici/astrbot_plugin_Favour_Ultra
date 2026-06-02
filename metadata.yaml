@@ -1,7 +1,7 @@
 name: astrbot_plugin_Favour_Ultra
 display_name: 可自定义好感度系统
 author: "糯米茨"
-version: v4.1.0
+version: v4.0.0
 description: "完整的好感度插件，具备自动搭话、好感自动衰减、冷暴力和拉黑能力"
 repo: https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/
 astrbot_version: ">=4.24"

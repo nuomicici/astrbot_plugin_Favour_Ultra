@@ -14,7 +14,6 @@ import asyncio
 from astrbot.api import logger
 from astrbot.core.message.components import Plain, At
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from astrbot.api.star import Star, register, Context
 from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api.event import filter
@@ -51,7 +50,6 @@ class FavourManagerTool(Star):
         self.min_favour_value = self.config.get("min_favour_value", -100)
         self.max_favour_value = self.config.get("max_favour_value", 100)
         self.default_favour = self.config.get("default_favour", 0)
-        self.favour_rule_prompt = self.config.get("favour_rule_prompt", "")
         self.favour_levels = self.config.get("favour_levels", [])
 
         # 高级配置
@@ -65,6 +63,7 @@ class FavourManagerTool(Star):
         self.perm_level_threshold = adv_conf.get("level_threshold", 50)
         self.blocked_sessions = adv_conf.get("blocked_sessions", [])
         self.allowed_sessions = adv_conf.get("allowed_sessions", [])
+        self.modify_favour_permission = adv_conf.get("modify_favour_permission", "admin")
 
         # 冷暴力配置
         cv_conf = self.config.get("cold_violence_config", {})
@@ -104,6 +103,12 @@ class FavourManagerTool(Star):
         
         # 黑名单（被自动拉黑的用户 session 组合）
         self.auto_blacklisted: Set[str] = set()
+        
+        # 存储每个会话的最近事件，供主动搭话使用
+        self._last_events: Dict[str, AstrMessageEvent] = {}
+        # 平台级缓存：{平台前缀: {self_id, platform_meta}}，兜底无会话事件时的搭话
+        #################
+        self._platform_cache: Dict[str, dict] = {}
 
         self._validate_config()
         
@@ -122,12 +127,20 @@ class FavourManagerTool(Star):
         asyncio.create_task(self._init_storage())
         
         # 启动衰减调度器
+        self._decay_task: Optional[asyncio.Task] = None
+        self._active_chat_task: Optional[asyncio.Task] = None
         if self.decay_enabled:
-            asyncio.create_task(self._decay_scheduler())
+            logger.debug(f"[初始化] 启动好感度衰减调度器（模式={self.decay_mode}，{self.decay_inactive_days}天无互动触发）")
+            self._decay_task = asyncio.create_task(self._decay_scheduler())
+        else:
+            logger.debug("[初始化] 好感度衰减已禁用")
         
         # 启动主动搭话调度器
         if self.active_chat_enabled:
-            asyncio.create_task(self._active_chat_scheduler())
+            logger.debug(f"[初始化] 启动主动搭话调度器（间隔={self.active_chat_interval}h，时段={self.active_chat_time_start}-{self.active_chat_time_end}，规则数={len(self.active_chat_rules)}）")
+            self._active_chat_task = asyncio.create_task(self._active_chat_scheduler())
+        else:
+            logger.debug("[初始化] 主动搭话已禁用")
 
         # 注册 WebUI Pages API
         self._register_page_apis()
@@ -191,6 +204,21 @@ class FavourManagerTool(Star):
         self.cold_violence_users: Dict[str, datetime] = {} # Key: user_id or session_id:user_id
         self.consecutive_decreases: Dict[str, int] = {} # 记录连续降低次数
 
+    async def terminate(self):
+        """插件卸载/重载时取消所有调度器任务，防止旧任务泄漏。"""
+        #################
+        for task in (self._decay_task, self._active_chat_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._decay_task = None
+        self._active_chat_task = None
+        logger.info("好感度插件调度器已全部取消。")
+        #################
+
     async def _init_storage(self):
         """初始化存储并迁移数据"""
         try:
@@ -220,8 +248,7 @@ class FavourManagerTool(Star):
             # 基础字段
             for key in ["favour_mode", "is_global_favour", "group_sort_by",
                         "enable_cold_violence", "enable_relationship_table",
-                        "min_favour_value", "max_favour_value", "default_favour",
-                        "favour_rule_prompt"]:
+                        "min_favour_value", "max_favour_value", "default_favour"]:
                 if key in framework_config:
                     self.config[key] = framework_config[key]
             
@@ -277,6 +304,8 @@ class FavourManagerTool(Star):
                 if decayed_count > 0:
                     mode_str = "分级" if self.decay_mode == "advanced" else "线性"
                     logger.info(f"好感度衰减({mode_str})完成：{decayed_count} 条衰减，{blacklisted_count} 条自动拉黑。")
+                else:
+                    logger.debug(f"[衰减调度器] 本轮检查完毕，无需衰减的记录。")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -284,7 +313,14 @@ class FavourManagerTool(Star):
                 await asyncio.sleep(600)  # 出错后等10分钟再试
 
     async def _active_chat_scheduler(self) -> None:
-        """主动搭话调度器：按配置的间隔，在允许时间段内按概率向用户主动搭话。"""
+        """主动搭话调度器：按配置的间隔，在允许时间段内按概率向用户主动搭话。
+        
+        规则：
+        - 同一会话中，按好感度从高到低依次计算概率。
+        - 同好感度成员随机排列。
+        - 一旦某个用户触发搭话，该会话本轮立即停止。
+        - 发送时进行分段处理（模拟被动回复的消息管线）。
+        """
         import random as _random
         while True:
             try:
@@ -307,6 +343,7 @@ class FavourManagerTool(Star):
                 now_minutes = now.hour * 60 + now.minute
                 
                 if now_minutes < start_minutes or now_minutes > end_minutes:
+                    logger.debug(f"[搭话调度器] 当前时间 {now.strftime('%H:%M')} 不在允许时段 {self.active_chat_time_start}-{self.active_chat_time_end}，跳过。")
                     continue  # 不在允许的时间范围内
                 
                 # 获取所有有过互动的用户记录
@@ -315,100 +352,345 @@ class FavourManagerTool(Star):
                 all_records.extend(non_global)
                 
                 if not all_records:
+                    logger.debug("[搭话调度器] 无用户记录，跳过本轮。")
                     continue
                 
-                # 按 rules 匹配并随机触发
-                rules_sorted = sorted(self.active_chat_rules or [], 
-                                      key=lambda r: r.get("min_favour", 0), reverse=True)
-                
+                # 按会话分组
+                session_groups: Dict[str, List[FavourRecord]] = {}
                 for record in all_records:
-                    # 跳过冷暴力/拉黑用户
-                    session_id = record.session_id if record.session_id != "global" else "global"
+                    sid = record.session_id if record.session_id != "global" else "global"
+                    # 过滤冷暴力/拉黑用户
                     user_id = record.user_id
-                    blacklist_key = f"{session_id}:{user_id}" if session_id != "global" else user_id
+                    blacklist_key = f"{sid}:{user_id}" if sid != "global" else user_id
                     if blacklist_key in self.auto_blacklisted:
                         continue
-                    cv_key = self._get_cold_violence_key(user_id, session_id)
+                    cv_key = self._get_cold_violence_key(user_id, sid)
                     if cv_key in self.cold_violence_users:
                         if datetime.now() < self.cold_violence_users[cv_key]:
                             continue
                     
-                    # 匹配好感度区间
-                    matched_prob = None
-                    for rule in rules_sorted:
-                        r_min = rule.get("min_favour", -999)
-                        r_max = rule.get("max_favour", 999)
-                        if r_min <= record.favour <= r_max:
-                            matched_prob = rule.get("probability", 0)
+                    if sid not in session_groups:
+                        session_groups[sid] = []
+                    session_groups[sid].append(record)
+                
+                # 按好感度区间匹配概率规则（从高到低排序）
+                rules_sorted = sorted(self.active_chat_rules or [], 
+                                      key=lambda r: r.get("min_favour", 0), reverse=True)
+                
+                # 对每个会话单独处理
+                total_sessions = len(session_groups)
+                total_candidates = sum(len(r) for r in session_groups.values())
+                logger.debug(f"[搭话调度器] 共 {total_sessions} 个会话，{total_candidates} 个候选用户，开始逐会话检查。")
+                
+                triggered_sessions = 0
+                for session_id, records in session_groups.items():
+                    # 按好感度降序排列，同好感度随机打乱
+                    records.sort(key=lambda r: r.favour, reverse=True)
+                    # 对同好感度的用户进行随机排列（Fisher-Yates 思想：分组后打乱）
+                    i = 0
+                    while i < len(records):
+                        j = i
+                        while j < len(records) and records[j].favour == records[i].favour:
+                            j += 1
+                        if j - i > 1:
+                            # 同好感度组：随机打乱
+                            group = records[i:j]
+                            _random.shuffle(group)
+                            records[i:j] = group
+                        i = j
+                    
+                    # 依次尝试搭话，触发即停
+                    triggered = False
+                    for record in records:
+                        if triggered:
                             break
-                    
-                    if matched_prob is None or matched_prob <= 0:
-                        continue
-                    
-                    # 按概率触发
-                    if _random.randint(1, 100) <= matched_prob:
-                        # 调用 LLM 生成搭话内容（使用会话 persona + 伪装成客户端输入）
-                        try:
-                            # 1. 获取当前会话的 persona（system_prompt）
-                            persona_mgr = self.context.persona_manager
-                            persona = await persona_mgr.get_default_persona_v3(umo=session_id) if persona_mgr else None
-                            sys_prompt = persona.get("prompt", "") if persona else ""
+                        
+                        user_id = record.user_id
+                        
+                        # 匹配好感度区间概率
+                        matched_prob = None
+                        for rule in rules_sorted:
+                            r_min = rule.get("min_favour", -999)
+                            r_max = rule.get("max_favour", 999)
+                            if r_min <= record.favour <= r_max:
+                                matched_prob = rule.get("probability", 0)
+                                break
+                        
+                        if matched_prob is None or matched_prob <= 0:
+                            continue
+                        
+                        # 按概率触发
+                        if _random.randint(1, 100) <= matched_prob:
+                            triggered = True
                             
-                            # 2. 获取 LLM 提供商 ID
-                            provider_id = await self.context.get_current_chat_provider_id(umo=session_id)
-                            if not provider_id:
-                                logger.warning(f"主动搭话：未找到 LLM 提供商 ID，跳过 ({user_id})")
-                                continue
-                            
-                            # 3. 构建 prompt（支持5个占位符）
-                            rel = record.relationship or "无"
-                            now = datetime.now()
-                            current_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
-                            last_ago = self._calc_last_interaction_ago(record.last_interaction)
-                            
-                            if self.active_chat_llm_prompt:
-                                prompt = self.active_chat_llm_prompt.format(
-                                    current_time=current_time_str,
-                                    last_interaction_ago=last_ago,
-                                    favour=record.favour,
-                                    relationship=rel,
-                                    user_name=user_id
+                            # 使用合成事件推入框架管线（替代直接调用 LLM + send_message）
+                            # 好处：persona、上下文、分段插件全部自动生效
+                            try:
+                                from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
+                                from astrbot.core.platform.message_type import MessageType
+
+                                last_event = self._last_events.get(session_id)
+                                # 平台级缓存兜底：无会话事件时用同平台其他会话的信息
+                                #################
+                                platform = session_id.split(":")[0] if ":" in session_id else session_id
+                                platform_info = self._platform_cache.get(platform, {})
+                                
+                                if not last_event and not platform_info:
+                                    logger.debug(f"[搭话调度器] 会话 {session_id} 无事件引用且无平台缓存，跳过。")
+                                    continue
+                                #################
+                                
+                                # 获取当前会话的 persona 信息用于构建提示词
+                                persona_mgr = self.context.persona_manager
+                                persona = await persona_mgr.get_default_persona_v3(umo=session_id) if persona_mgr else None
+                                sys_prompt = persona.get("prompt", "") if persona else ""
+                                
+                                # 构建搭话指令
+                                rel = record.relationship or "无"
+                                current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                last_ago = self._calc_last_interaction_ago(record.last_interaction)
+                                
+                                if self.active_chat_llm_prompt:
+                                    prompt = self.active_chat_llm_prompt.format(
+                                        current_time=current_time_str,
+                                        last_interaction_ago=last_ago,
+                                        favour=record.favour,
+                                        relationship=rel,
+                                        user_name=user_id
+                                    )
+                                else:
+                                    prompt = (
+                                        f"现在时间是 {current_time_str}，距离上次互动已经 {last_ago}。"
+                                        f"请以自然、不经意的方式向用户 {user_id} 发起聊天。"
+                                        f"当前好感度：{record.favour}，关系：{rel}。"
+                                        f"回复简短自然，不超过50字。不要使用任何标签或格式标记。"
+                                        f"注意：这是一条系统触发的主动搭话，请不要让用户察觉是你主动找过来的。"
+                                    )
+                                
+                                synth_msg = AstrBotMessage()
+                                # 优先用会话事件，其次用平台缓存推断
+                                #################
+                                if last_event:
+                                    synth_msg.type = last_event.message_obj.type if hasattr(last_event.message_obj, 'type') else MessageType.FRIEND_MESSAGE
+                                    synth_msg.self_id = getattr(last_event.message_obj, 'self_id', '')
+                                    last_group_id = getattr(last_event.message_obj, 'group_id', '')
+                                    _platform_meta = last_event.platform_meta
+                                else:
+                                    # 从 session_id 推断消息类型
+                                    if 'GroupMessage' in str(session_id):
+                                        synth_msg.type = MessageType.GROUP_MESSAGE
+                                    else:
+                                        synth_msg.type = MessageType.FRIEND_MESSAGE
+                                    synth_msg.self_id = platform_info.get("self_id", "")
+                                    last_group_id = session_id.split(":")[2] if 'GroupMessage' in str(session_id) and session_id.count(":") >= 2 else ""
+                                    _platform_meta = platform_info.get("platform_meta")
+                                #################
+                                synth_msg.session_id = session_id
+                                synth_msg.message_id = f"active_chat_{datetime.now().timestamp()}"
+                                synth_msg.sender = MessageMember(user_id=user_id, nickname=user_id)
+                                synth_msg.message = [Plain(text=prompt)]
+                                synth_msg.message_str = prompt
+                                synth_msg.raw_message = None
+                                synth_msg.timestamp = int(datetime.now().timestamp())
+                                if last_group_id:
+                                    synth_msg.group_id = last_group_id
+                                
+                                # 构造合成事件
+                                synth_event = AstrMessageEvent(
+                                    message_str=prompt,
+                                    message_obj=synth_msg,
+                                    platform_meta=_platform_meta,
+                                    session_id=session_id,
                                 )
-                            else:
-                                prompt = (
-                                    f"现在时间是 {current_time_str}，距离上次互动已经 {last_ago}。"
-                                    f"请以自然、不经意的方式向用户 {user_id} 发起聊天。"
-                                    f"当前好感度：{record.favour}，关系：{rel}。"
-                                    f"回复简短自然，不超过50字。不要使用任何标签或格式标记。"
-                                    f"注意：这是一条系统触发的主动搭话，请不要让用户察觉是你主动找过来的。"
-                                )
-                            
-                            # 4. 伪装成客户端输入：作为 UserMessageSegment 传入
-                            from astrbot.core.agent.message import UserMessageSegment, TextPart
-                            user_msg = UserMessageSegment(content=[TextPart(text=prompt)])
-                            
-                            llm_resp = await self.context.llm_generate(
-                                chat_provider_id=provider_id,
-                                contexts=[user_msg],
-                                system_prompt=sys_prompt
-                            )
-                            
-                            reply_text = llm_resp.completion_text.strip() if llm_resp else "嗨，在吗？"
-                            if not reply_text:
-                                reply_text = "嗨，最近还好吗？"
-                            
-                            from astrbot.api.event import MessageChain
-                            chain = MessageChain().message(reply_text)
-                            await self.context.send_message(session_id, chain)
-                            logger.info(f"主动搭话(LLM/persona) → 用户 {user_id} (会话 {session_id})，好感度 {record.favour}，概率 {matched_prob}%")
-                        except Exception as send_err:
-                            logger.warning(f"主动搭话失败 ({user_id}): {send_err}")
+                                #################
+                                # 关键标志：让管线正常处理（触发 LLM + 分段等）
+                                synth_event.is_at_or_wake_command = True
+                                synth_event.call_llm = False  # False = 允许 LLM 调用
+                                # 标记为搭话合成事件，供 inject_favour_prompt / update_data 识别
+                                synth_event.set_extra("_is_active_chat_synthetic", True)
+                                synth_event.set_extra("_active_chat_target_uid", user_id)
+                                
+                                # aiocqhttp 平台走事件队列（完整管线：persona + 分段）;
+                                # 非 aiocqhttp 平台（微信等）直接调 LLM + 发送，避免合成事件不被适配器识别
+                                #################
+                                if platform.startswith("aiocqhttp"):
+                                    self.context.get_event_queue().put_nowait(synth_event)
+                                    logger.info(f"[搭话调度器] 合成事件已推入管线 → 目标 {user_id} (会话 {session_id})，概率 {matched_prob}%")
+                                else:
+                                    # 直接调 LLM 生成搭话内容并分段发送
+                                    logger.info(f"[搭话调度器] 非QQ平台直接发送 → 目标 {user_id} (会话 {session_id})，概率 {matched_prob}%")
+                                    self._send_direct_active_chat(session_id, prompt, record, user_id, sys_prompt)
+                                #################
+                            except Exception as send_err:
+                                logger.warning(f"主动搭话失败 ({user_id}): {send_err}")
+                
+                logger.debug(f"[搭话调度器] 本轮完成：{triggered_sessions}/{total_sessions} 个会话触发了搭话。")
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"主动搭话调度器出错: {e}\n{traceback.format_exc()}")
                 await asyncio.sleep(600)
+
+    async def _send_direct_active_chat(self, session_id: str, prompt: str,
+                                        record, user_id: str, sys_prompt: str) -> None:
+        """非QQ平台直接调LLM生成搭话内容并发送（绕过合成事件管线）。"""
+        #################
+        try:
+            from astrbot.api.provider import ProviderRequest
+            req = ProviderRequest(
+                prompt=prompt,
+                system_prompt=sys_prompt or "",
+                image_urls=None,
+            )
+            llm_response = await self.context.llm_manager.get_response(req, session_id)
+            if llm_response and llm_response.completion_text:
+                await self._send_active_chat_message(
+                    session_id, llm_response.completion_text,
+                    user_id, record.favour
+                )
+            else:
+                logger.warning(f"[搭话调度器] LLM 未生成回复 ({user_id})")
+        except Exception as e:
+            logger.error(f"直接搭话失败 ({user_id}): {e}")
+
+    async def _send_active_chat_message(self, session_id: str, reply_text: str,
+                                         user_id: str = "", favour: int = 0) -> None:
+        """分段发送主动搭话消息。
+        
+        将 LLM 生成的回复文本按自然句边界分割，逐段发送并加入延迟，
+        模拟被动回复经过 on_decorating_result 管线（如分段对话 pro 插件）的效果。
+        
+        分割策略：
+        - 优先在句末标点（。！？!?\n）处切断
+        - 保护代码块（```...```）和思考块（<think>...</think>）不被切断
+        - 单段最长约 200 字符，超出则在逗号/分号处软切断
+        - 段落间延迟：基于文本长度的线性延迟（0.5s 基础 + 0.1s/字）
+        """
+        if not reply_text or not reply_text.strip():
+            return
+        
+        logger.debug(f"[搭话分段] 准备向会话 {session_id} 发送搭话，原文 {len(reply_text)} 字。")
+        
+        # 第一步：按句末标点 + 换行做硬分割
+        hard_pattern = re.compile(r'([。！？!?\n]+)')
+        
+        raw_segments = []
+        # 保护块：```...``` 和 <think>...</think>
+        protected_regions = []
+        
+        def protect_blocks(text: str) -> str:
+            """将代码块和思考块替换为占位符"""
+            result = text
+            protected_regions.clear()
+            
+            # 保护代码块 ```
+            for match in re.finditer(r'```[\s\S]*?```', result):
+                placeholder = f"__PROTECTED_BLOCK_{len(protected_regions)}__"
+                protected_regions.append(match.group(0))
+                result = result.replace(match.group(0), placeholder, 1)
+            
+            # 保护思考块 <think>...</think>
+            for match in re.finditer(r'<think>[\s\S]*?</think>', result):
+                placeholder = f"__PROTECTED_BLOCK_{len(protected_regions)}__"
+                protected_regions.append(match.group(0))
+                result = result.replace(match.group(0), placeholder, 1)
+            
+            return result
+        
+        def restore_blocks(text: str) -> str:
+            """恢复占位符"""
+            result = text
+            for i, block in enumerate(protected_regions):
+                result = result.replace(f"__PROTECTED_BLOCK_{i}__", block)
+            return result
+        
+        protected_text = protect_blocks(reply_text)
+        
+        # 硬分割
+        parts = hard_pattern.split(protected_text)
+        current = ""
+        for part in parts:
+            if not part:
+                continue
+            if hard_pattern.fullmatch(part):
+                current += part
+                raw_segments.append(current)
+                current = ""
+            else:
+                current += part
+        if current:
+            raw_segments.append(current)
+        
+        # 第二步：合并过短的段，拆分过长的段
+        final_segments = []
+        buffer_text = ""
+        
+        for seg in raw_segments:
+            candidate = buffer_text + seg
+            if len(candidate) <= 200:
+                buffer_text = candidate
+            else:
+                if buffer_text:
+                    final_segments.append(buffer_text)
+                    buffer_text = ""
+                # 对长段进行软分割（在逗号/分号处）
+                remaining = seg
+                while len(remaining) > 200:
+                    # 在 150~200 字符范围内找逗号/分号
+                    split_pos = -1
+                    search_start = max(150, len(remaining) - 200)
+                    for pos in range(min(200, len(remaining) - 1), search_start, -1):
+                        if remaining[pos] in ('，', ',', '；', ';', '、'):
+                            split_pos = pos + 1
+                            break
+                    if split_pos < 0:
+                        # 找不到合适的分割点，硬切在 200
+                        split_pos = 200
+                    final_segments.append(remaining[:split_pos])
+                    remaining = remaining[split_pos:]
+                if remaining:
+                    buffer_text = remaining
+        
+        if buffer_text:
+            final_segments.append(buffer_text)
+        
+        # 第三部：恢复保护块并发送
+        for i, seg in enumerate(final_segments):
+            restored = restore_blocks(seg).strip()
+            if not restored:
+                continue
+            
+            from astrbot.api.event import MessageChain
+            chain = MessageChain().message(restored)
+            try:
+                await self.context.send_message(session_id, chain)
+                if i < len(final_segments) - 1:
+                    # 段落间延迟
+                    delay = 0.5 + len(restored) * 0.1
+                    await asyncio.sleep(min(delay, 3.0))
+            except Exception as e:
+                logger.warning(f"主动搭话分段发送失败 (段{i+1}/{len(final_segments)}): {e}")
+        
+        logger.debug(f"[搭话分段] 发送完成，共 {len(final_segments)} 段。")
+        
+        # 将搭话消息记录进平台消息历史（确保后续 LLM 对话能引用它）
+        try:
+            parts = session_id.split(":", 2)
+            platform_id = parts[0] if len(parts) >= 1 else session_id
+            target_id = parts[2] if len(parts) >= 3 else session_id
+            # 取回复文本的缩写作为内容摘要
+            summary = reply_text[:200] if len(reply_text) > 200 else reply_text
+            await self.context.message_history_manager.insert(
+                platform_id=platform_id,
+                user_id=target_id,
+                content={"text": summary},
+                sender_id="astrbot",   # 标记为 Bot 发送
+                sender_name="Bot",
+            )
+            logger.debug(f"[搭话分段] 已记录到平台消息历史 ({platform_id}/{target_id})。")
+        except Exception as hist_err:
+            logger.debug(f"[搭话分段] 写入消息历史失败（非致命）: {hist_err}")
 
     # ==================== Pages API ====================
 
@@ -425,6 +707,14 @@ class FavourManagerTool(Star):
             self._api_save_config,
             ["POST"],
             "保存插件配置"
+        )
+        # 数据管理 API（GET + POST 合并到一个 handler，避免双注册冲突）
+        #################
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/datarecords",
+            self._api_datarecords,
+            ["GET", "POST"],
+            "好感度数据管理（GET=查询, POST=更新/删除）"
         )
 
     async def _api_get_config(self):
@@ -444,17 +734,101 @@ class FavourManagerTool(Star):
             if not data or not isinstance(data, dict):
                 return jsonify({"success": False, "error": "无效的请求数据"}), 400
 
+            logger.debug(f"[配置保存] 收到 WebUI 配置保存请求，共 {len(data)} 个顶级字段。")
             success = self.config_mgr.update_from_webui(data)
             if not success:
                 return jsonify({"success": False, "error": "配置验证失败（分级至少3个，第8个起desc必填）"}), 400
 
             # 运行时更新：重新读取配置到 self 属性
             self._reload_config_from_manager()
+            
+            # 更新数据库好感度边界（min/max 变更热生效）
+            #################
+            self.db_manager.set_limits(self.min_favour_value, self.max_favour_value)
+            # 更新权限管理器的群等级阈值
+            perm_mgr = PermissionManager.get_instance()
+            perm_mgr.level_threshold = self.perm_level_threshold
+            
+            # 热重启调度器：取消旧任务，按新配置启动
+            await self._restart_schedulers()
 
-            logger.info("WebUI Pages 配置已更新并保存。")
+            logger.info("WebUI Pages 配置已更新并保存（含调度器热重启）。")
             return jsonify({"success": True})
         except Exception as e:
             logger.error(f"保存配置失败: {e}\n{traceback.format_exc()}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    # ==================== 数据管理 API ====================
+    #################
+
+    async def _api_datarecords(self):
+        """GET+POST /datarecords → 数据管理统一入口"""
+        from quart import request, jsonify
+        try:
+            if request.method == "GET":
+                all_records = await self.db_manager.get_all_records()
+                global_list = []
+                non_global_list = []
+
+                for r in all_records:
+                    base = {
+                        "id": r.id,
+                        "user_id": r.user_id,
+                        "username": r.username or r.user_id,
+                        "favour": r.favour,
+                        "relationship": r.relationship or "无",
+                        "is_unique": r.is_unique,
+                        "last_interaction": r.last_interaction.isoformat() if r.last_interaction else ""
+                    }
+                    if r.session_id == "global":
+                        global_list.append(base)
+                    else:
+                        parts = r.session_id.split(":", 2)
+                        base["platform"] = parts[0] if len(parts) >= 1 else r.session_id
+                        base["session_type"] = parts[1] if len(parts) >= 2 else ""
+                        base["session_target"] = parts[2] if len(parts) >= 3 else ""
+                        base["session_id"] = r.session_id
+                        non_global_list.append(base)
+
+                return jsonify({"global": global_list, "non_global": non_global_list})
+
+            # POST
+            data = await request.get_json()
+            if not data or "action" not in data or "id" not in data:
+                return jsonify({"success": False, "error": "缺少 action 或 id"}), 400
+
+            action = data["action"]
+            record_id = int(data["id"])
+
+            if action == "delete":
+                ok = await self.db_manager.delete_record(record_id)
+                if ok:
+                    logger.info(f"[数据管理] 已删除记录 #{record_id}")
+                return jsonify({"success": ok})
+
+            elif action == "update":
+                updates = {}
+                for field in ("favour", "relationship", "username", "is_unique"):
+                    if field in data:
+                        val = data[field]
+                        if field == "favour":
+                            val = int(val)
+                            val = max(self.min_favour_value, min(self.max_favour_value, val))
+                        elif field == "is_unique":
+                            val = bool(val)
+                        updates[field] = val
+                if not updates:
+                    return jsonify({"success": False, "error": "无可更新字段"}), 400
+                ok = await self.db_manager.update_record(record_id, **updates)
+                if ok:
+                    logger.info(f"[数据管理] 已更新记录 #{record_id}: {updates}")
+                return jsonify({"success": ok})
+
+            else:
+                return jsonify({"success": False, "error": f"未知操作: {action}"}), 400
+
+        except Exception as e:
+            logger.error(f"数据管理操作失败: {e}\n{traceback.format_exc()}")
             return jsonify({"success": False, "error": str(e)}), 500
 
     def _reload_config_from_manager(self) -> None:
@@ -469,7 +843,6 @@ class FavourManagerTool(Star):
         self.min_favour_value = cfg.get("min_favour_value", -100)
         self.max_favour_value = cfg.get("max_favour_value", 100)
         self.default_favour = cfg.get("default_favour", 0)
-        self.favour_rule_prompt = cfg.get("favour_rule_prompt", "")
         self.favour_levels = cfg.get("favour_levels", [])
 
         adv = cfg.get("advanced_config", {})
@@ -482,6 +855,7 @@ class FavourManagerTool(Star):
         self.perm_level_threshold = adv.get("level_threshold", 50)
         self.blocked_sessions = adv.get("blocked_sessions", [])
         self.allowed_sessions = adv.get("allowed_sessions", [])
+        self.modify_favour_permission = adv.get("modify_favour_permission", "admin")
 
         cv = cfg.get("cold_violence_config", {})
         self.cold_violence_consecutive_threshold = cv.get("consecutive_decrease_threshold", 3)
@@ -512,7 +886,9 @@ class FavourManagerTool(Star):
         self.query_private_normal = qp.get("private_normal_user", True)
 
         self._validate_config()
-
+        
+        # 同步 DB 层的边界（之前只在 __init__ 时传入，热重载后不会更新）
+        self.db_manager.set_limits(self.min_favour_value, self.max_favour_value)
 
 
     def _validate_config(self) -> None:
@@ -522,6 +898,39 @@ class FavourManagerTool(Star):
         
         self.default_favour = max(self.min_favour_value, min(self.max_favour_value, self.default_favour))
         self.admin_default_favour = max(self.min_favour_value, min(self.max_favour_value, self.admin_default_favour))
+
+    async def _restart_schedulers(self) -> None:
+        """热重启调度器：取消旧任务，按新配置启动。在 WebUI 保存配置后调用。"""
+        # 1. 取消旧的衰减调度器
+        if self._decay_task and not self._decay_task.done():
+            self._decay_task.cancel()
+            try:
+                await self._decay_task
+            except asyncio.CancelledError:
+                pass
+        self._decay_task = None
+        
+        # 2. 取消旧的搭话调度器
+        if self._active_chat_task and not self._active_chat_task.done():
+            self._active_chat_task.cancel()
+            try:
+                await self._active_chat_task
+            except asyncio.CancelledError:
+                pass
+        self._active_chat_task = None
+        
+        # 3. 按新配置重启
+        if self.decay_enabled:
+            self._decay_task = asyncio.create_task(self._decay_scheduler())
+            logger.info("好感度衰减调度器已按新配置重启。")
+        else:
+            logger.info("好感度衰减已禁用，调度器已停止。")
+        
+        if self.active_chat_enabled:
+            self._active_chat_task = asyncio.create_task(self._active_chat_scheduler())
+            logger.info(f"主动搭话调度器已按新配置重启（间隔 {self.active_chat_interval}h，{self.active_chat_time_start}-{self.active_chat_time_end}）。")
+        else:
+            logger.info("主动搭话已禁用，调度器已停止。")
 
     def _get_target_uid(self, event: AstrMessageEvent, text_arg: str, raw_extra_args: str = "") -> Optional[str]:
         """获取目标用户ID，支持At和纯文本。
@@ -596,11 +1005,28 @@ class FavourManagerTool(Star):
     async def _check_permission(self, event: AstrMessageEvent, required_level: int) -> bool:
         if str(event.get_sender_id()) in self.admins_id:
             return True
+        # 延迟导入：避免非 aiocqhttp 平台因硬导入而崩溃
+        #################
+        try:
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+        except ImportError:
+            return False  # 非 aiocqhttp 平台，无法获取群权限，回退到仅检查 superuser
+        #################
         if not isinstance(event, AiocqhttpMessageEvent):
             return False 
         perm_mgr = PermissionManager.get_instance()
         level = await perm_mgr.get_perm_level(event, event.get_sender_id())
         return level >= required_level
+
+    async def _check_query_permission(self, event: AstrMessageEvent) -> bool:
+        """检查查询权限：管理员始终可查，普通用户按配置开关。"""
+        #################
+        if await self._check_permission(event, PermLevel.ADMIN):
+            return True
+        is_group = bool(event.get_group_id())
+        if is_group:
+            return self.query_group_normal
+        return self.query_private_normal
 
     async def _get_initial_favour(self, event: AstrMessageEvent) -> int:
         user_id = str(event.get_sender_id())
@@ -688,7 +1114,8 @@ class FavourManagerTool(Star):
                            若为 None，则返回全部等级（兼容旧行为）。
         """
         if not self.favour_levels:
-            return self.favour_rule_prompt
+            return ""  # favour_rule_prompt 已过时，返回空字符串
+            #################
         
         # --- 只注入当前等级的优化路径 ---
         if current_favour is not None:
@@ -715,7 +1142,7 @@ class FavourManagerTool(Star):
                     line += desc
                 return line
             else:
-                return ""  # 未匹配到任何等级
+                return f"- 当前好感度 {current_favour} 未能匹配任何已配置的等级区间，请检查好感度分级配置（当前 {len(self.favour_levels)} 个等级）。"
         
         # --- 旧行为：返回全部等级（兼容）---
         lines = ["- 好感度等级：根据好感度数值的高低，共分为以下等级。"]
@@ -756,15 +1183,37 @@ class FavourManagerTool(Star):
             session_id = self._get_session_id(event)
             user_id = str(event.get_sender_id())
 
+            # 存储事件引用，供主动搭话合成事件使用
+            if session_id and session_id != "global":
+                self._last_events[session_id] = event
+                # 同时缓存平台级信息，兜底该平台其他无事件会话的搭话
+                #################
+                platform = session_id.split(":")[0] if ":" in session_id else session_id
+                if platform not in self._platform_cache and hasattr(event, 'platform_meta'):
+                    self._platform_cache[platform] = {
+                        "platform_meta": event.platform_meta,
+                        "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
+                    }
+            #################
+            # 搭话合成事件：使用目标用户的好感度数据
+            is_synthetic = event.get_extra("_is_active_chat_synthetic")
+            target_uid = event.get_extra("_active_chat_target_uid")
+            if is_synthetic and target_uid:
+                user_id = str(target_uid)
+                logger.debug(f"[搭话管线] 合成事件注入目标用户 {user_id} 的好感度/关系数据。")
+
             if session_id != "global":
                 if self.allowed_sessions and session_id not in self.allowed_sessions:
+                    logger.debug(f"[Prompt注入] 会话 {session_id} 不在白名单中，跳过。")
                     return
                 if session_id in self.blocked_sessions:
+                    logger.debug(f"[Prompt注入] 会话 {session_id} 在黑名单中，跳过。")
                     return
 
             # 检查自动拉黑
             blacklist_key = f"{session_id}:{user_id}" if session_id != "global" else user_id
             if blacklist_key in self.auto_blacklisted:
+                logger.debug(f"[Prompt注入] 用户 {user_id} 已被自动拉黑，跳过。")
                 return  # 已拉黑用户，不再处理其消息
 
             # 检查冷暴力
@@ -775,6 +1224,7 @@ class FavourManagerTool(Star):
                     if datetime.now() < expiry:
                         remaining = expiry - datetime.now()
                         time_str = f"{int(remaining.total_seconds() // 60)}分"
+                        logger.debug(f"[Prompt注入] 用户 {user_id} 处于冷暴力状态（剩余 {time_str}），拦截消息并回复。")
                         reply = self.cold_violence_replies["on_message"].format(time_str=time_str)
                         await event.send(event.plain_result(reply))
                         event.stop_event()
@@ -800,6 +1250,17 @@ class FavourManagerTool(Star):
                 admin_status = "群管理员"
             else:
                 admin_status = "普通用户"
+
+            # 异步更新用户名（供 WebUI 数据管理展示）
+            #################
+            if record and not is_synthetic:
+                try:
+                    display_name = await self._get_user_display_name(event, user_id)
+                    if display_name and display_name != user_id and display_name != record.username:
+                        await self.db_manager.update_record(record.id, username=display_name)
+                except Exception:
+                    pass  # 非关键操作，静默失败
+            #################
 
             # 获取排他性关系 & 构建关系表
             exclusive_prompt_addon = ""
@@ -977,8 +1438,7 @@ class FavourManagerTool(Star):
     </UserContext>
     <CurrentLevelRule>{levels_rule}</CurrentLevelRule>
     <LimitConstraint>
-        若当前好感度 {current_favour} 已达到上限 {self.max_favour_value}，则禁止输出 [好感度 上升]，
-        仅允许输出 [好感度 持平] 或 [好感度 降低]。
+        {"若当前好感度 " + str(current_favour) + " 已达到上限 " + str(self.max_favour_value) + "，则禁止输出 [好感度 上升]，仅允许输出 [好感度 持平] 或 [好感度 降低]。" if current_favour >= self.max_favour_value else "当前好感度 " + str(current_favour) + " 未达上限 " + str(self.max_favour_value) + "，可正常增减。下限为 " + str(self.min_favour_value) + "。"}
     </LimitConstraint>
 </FavourDynamicContext>"""
 
@@ -998,6 +1458,12 @@ class FavourManagerTool(Star):
     async def handle_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
         """优先读取好感度标签（priority=10 确保在其他钩子之前执行）。"""
         if not hasattr(event, 'message_obj'): return
+        
+        # 搭话合成事件：不记录好感度变更（搭话不应影响好感度）
+        if event.get_extra("_is_active_chat_synthetic"):
+            logger.debug("[搭话管线] 搭话合成事件，跳过好感度标签解析。")
+            return
+        
         msg_id = str(event.message_obj.message_id)
         text = resp.completion_text
         
@@ -1096,6 +1562,12 @@ class FavourManagerTool(Star):
     @filter.on_decorating_result(priority=10)
     async def update_data(self, event: AstrMessageEvent):
         if not hasattr(event, 'message_obj'): return
+        
+        # 搭话合成事件：不更新好感度数据
+        if event.get_extra("_is_active_chat_synthetic"):
+            logger.debug("[搭话管线] 搭话合成事件，跳过好感度数据更新。")
+            return
+        
         msg_id = str(event.message_obj.message_id)
         data = self.pending_updates.pop(msg_id, None)
         
@@ -1227,6 +1699,7 @@ class FavourManagerTool(Star):
                 if datetime.now() < expiry:
                     remaining = expiry - datetime.now()
                     time_str = f"{int(remaining.total_seconds() // 60)}分"
+                    logger.debug(f"[查询好感度] 用户 {user_id} 处于冷暴力状态（剩余 {time_str}），返回拦截回复。")
                     msg = self.cold_violence_replies["on_query"].format(time_str=time_str)
                     yield event.plain_result(msg)
                     return
@@ -1247,6 +1720,12 @@ class FavourManagerTool(Star):
     @filter.command("查询当前好感度", alias={'查当前好感度', '查询本群好感度', '查本群好感度', '查群好感度', '查询群好感度', '当前好感度', '本群好感度', '群好感度'})
     async def query_current_session_favour(self, event: AstrMessageEvent, page: int = 1):
         """查询当前会话的所有好感度记录 (支持分页)"""
+        # 权限检查：批量查询仅管理员可用
+        #################
+        if not await self._check_query_permission(event):
+            yield event.plain_result("权限不足：批量查询仅管理员可用。")
+            return
+        #################
         if self.is_global_favour:
             yield event.plain_result("当前为全局模式，此命令无效。请使用【查询全局好感度】。")
             return
@@ -1383,9 +1862,17 @@ class FavourManagerTool(Star):
 
     @filter.command("修改好感度")
     async def modify_favour(self, event: AstrMessageEvent, target: str, value: int):
-        """修改好感度: /修改好感度 @用户 50 (群管理员)"""
-        if not await self._check_permission(event, PermLevel.ADMIN):
-            yield event.plain_result("权限不足！需要群管理员及以上权限。")
+        """修改好感度: /修改好感度 @用户 50 (权限由配置控制)"""
+        # 根据配置决定所需权限级别
+        perm_map = {
+            "superuser": PermLevel.SUPERUSER,
+            "owner": PermLevel.OWNER,
+            "admin": PermLevel.ADMIN,
+        }
+        required_perm = perm_map.get(self.modify_favour_permission, PermLevel.ADMIN)
+        if not await self._check_permission(event, required_perm):
+            perm_names = {"superuser": "Bot管理员", "owner": "群主", "admin": "管理员"}
+            yield event.plain_result(f"权限不足！需要{perm_names.get(self.modify_favour_permission, '管理员')}及以上权限。")
             return
             
         uid = self._get_target_uid(event, target)
@@ -1394,10 +1881,21 @@ class FavourManagerTool(Star):
             return
             
         session_id = self._get_session_id(event)
+        
+        # 边界检查：clamp 到 [min, max] 并告知用户
+        orig_value = value
+        clamped_value = max(self.min_favour_value, min(self.max_favour_value, value))
         try:
-            await self.db_manager.update_favour(uid, session_id, favour=value)
-            yield event.plain_result(f"已将用户 {uid} 的好感度修改为 {value}。")
-            logger.info(f"管理员 {event.get_sender_id()} 修改用户 {uid} 好感度为 {value}")
+            await self.db_manager.update_favour(uid, session_id, favour=clamped_value)
+            logger.debug(f"[修改好感度] 操作者={event.get_sender_id()}，目标={uid}，会话={session_id}，输入值={orig_value}，实际={clamped_value}")
+            if orig_value != clamped_value:
+                yield event.plain_result(
+                    f"⚠️ 输入值 {orig_value} 超出允许范围 [{self.min_favour_value}, {self.max_favour_value}]，"
+                    f"已调整为 {clamped_value}。"
+                )
+            else:
+                yield event.plain_result(f"已将用户 {uid} 的好感度修改为 {clamped_value}。")
+            logger.info(f"管理员 {event.get_sender_id()} 修改用户 {uid} 好感度为 {clamped_value}（输入 {orig_value}）")
         except Exception as e:
             logger.error(f"修改好感度失败: {e}")
             yield event.plain_result("修改失败，请检查日志。")
@@ -1456,9 +1954,18 @@ class FavourManagerTool(Star):
         if not uid: return
         
         try:
-            count = await self.db_manager.update_user_all_records(uid, favour=value)
-            yield event.plain_result(f"已更新用户 {uid} 在所有会话中的好感度为 {value} (共 {count} 条记录)。")
-            logger.info(f"Bot管理员 {event.get_sender_id()} 全局修改用户 {uid} 好感度为 {value}")
+            orig_value = value
+            clamped_value = max(self.min_favour_value, min(self.max_favour_value, value))
+            count = await self.db_manager.update_user_all_records(uid, favour=clamped_value)
+            logger.debug(f"[全局修改好感度] 操作者={event.get_sender_id()}，目标={uid}，输入值={orig_value}，实际={clamped_value}，影响记录数={count}")
+            if orig_value != clamped_value:
+                yield event.plain_result(
+                    f"⚠️ 输入值 {orig_value} 超出允许范围 [{self.min_favour_value}, {self.max_favour_value}]，"
+                    f"已调整为 {clamped_value}（共 {count} 条记录）。"
+                )
+            else:
+                yield event.plain_result(f"已更新用户 {uid} 在所有会话中的好感度为 {clamped_value} (共 {count} 条记录)。")
+            logger.info(f"Bot管理员 {event.get_sender_id()} 全局修改用户 {uid} 好感度为 {clamped_value}（输入 {orig_value}）")
         except Exception as e:
             logger.error(f"全局修改好感度失败: {e}")
             yield event.plain_result("修改失败，请检查日志。")
@@ -1517,9 +2024,17 @@ class FavourManagerTool(Star):
         try:
             if operation == "修改好感度":
                 val = int(arg1)
-                await self.db_manager.update_favour(target_uid, target_sid, favour=val)
-                yield event.plain_result(f"已将会话 {target_sid} 中用户 {target_uid} 的好感度修改为 {val}。")
-                logger.info(f"Bot管理员 {event.get_sender_id()} 跨会话修改 {target_sid} 用户 {target_uid} 好感度为 {val}")
+                orig_val = val
+                clamped_val = max(self.min_favour_value, min(self.max_favour_value, val))
+                await self.db_manager.update_favour(target_uid, target_sid, favour=clamped_val)
+                if orig_val != clamped_val:
+                    yield event.plain_result(
+                        f"⚠️ 输入值 {orig_val} 超出允许范围 [{self.min_favour_value}, {self.max_favour_value}]，"
+                        f"已调整为 {clamped_val}（会话 {target_sid}）。"
+                    )
+                else:
+                    yield event.plain_result(f"已将会话 {target_sid} 中用户 {target_uid} 的好感度修改为 {clamped_val}。")
+                logger.info(f"Bot管理员 {event.get_sender_id()} 跨会话修改 {target_sid} 用户 {target_uid} 好感度为 {clamped_val}（输入 {orig_val}）")
 
             elif operation == "修改关系":
                 if not arg1:
@@ -1726,6 +2241,13 @@ class FavourManagerTool(Star):
         is_owner = await self._check_permission(event, PermLevel.OWNER)
         is_admin = await self._check_permission(event, PermLevel.ADMIN)
         
+        # 根据配置确定修改好感度所需权限
+        perm_map = {"superuser": PermLevel.SUPERUSER, "owner": PermLevel.OWNER, "admin": PermLevel.ADMIN}
+        perm_names = {"superuser": "Bot管理员", "owner": "群主", "admin": "管理员"}
+        required_perm = perm_map.get(self.modify_favour_permission, PermLevel.ADMIN)
+        can_modify = await self._check_permission(event, required_perm)
+        modify_perm_name = perm_names.get(self.modify_favour_permission, "管理员")
+        
         msg = ["⭐ 好感度插件命令菜单 ⭐"]
         
         msg.append("\n[通用命令]")
@@ -1733,8 +2255,8 @@ class FavourManagerTool(Star):
         msg.append("- 查询当前好感度 [页码]")
         msg.append("- 好感度指令帮助")
         
-        if is_admin or is_superuser:
-            msg.append("\n[管理员命令]")
+        if can_modify or is_superuser:
+            msg.append(f"\n[{modify_perm_name}命令]")
             msg.append("- 修改好感度 @用户 <数值>")
         
         if is_owner or is_superuser:
@@ -1761,7 +2283,9 @@ class FavourManagerTool(Star):
     @filter.command("好感度指令帮助")
     async def help_usage(self, event: AstrMessageEvent):
         """显示详细指令用法"""
-        msg = """⭐ 好感度指令用法示例 ⭐
+        perm_names = {"superuser": "Bot管理员", "owner": "群主", "admin": "管理员"}
+        modify_name = perm_names.get(self.modify_favour_permission, "管理员")
+        msg = f"""⭐ 好感度指令用法示例 ⭐
 
 1. 查询好感度
    用法: /查询好感度 [@用户]
@@ -1769,7 +2293,7 @@ class FavourManagerTool(Star):
    用法: /查询当前好感度 [页码]
    示例: /查询当前好感度 2
 
-2. 修改好感度 (管理员)
+2. 修改好感度 ({modify_name})
    用法: /修改好感度 @用户 <数值>
    示例: /修改好感度 @糯米茨 60
 

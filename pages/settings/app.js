@@ -14,9 +14,12 @@ $('btn-save').onclick = () => save();
 
 // ===== 渲染 =====
 function show(t) {
-  const r = { basic, levels, decay, active, perm, adv, cold };
-  $('body').innerHTML = (r[t] || (()=>'')).call(this);
+  const r = { basic, levels, decay, active, perm, adv, cold, data };
+  const bodyEl = document.getElementById('body');
+  if (!bodyEl) return;
+  bodyEl.innerHTML = (r[t] || (()=>'')).call(this);
   bindAll();
+  if (t === 'data') requestAnimationFrame(() => loadDataPanel());
 }
 
 // ===== 工具 =====
@@ -114,7 +117,9 @@ function active() {
 }
 
 // ===== Tab: 权限 =====
-function perm() { return sec('查询权限')+row(chk('query_permission.group_normal_user','群聊普通用户可查','关闭后仅管理员可查'),chk('query_permission.private_normal_user','私聊普通用户可查','关闭后仅管理员可查')); }
+function perm() { return sec('查询权限（管理员始终可查）')+
+    row(sel('query_permission.group_normal_user','群聊查询',[[true,'允许所有人查询'],[false,'仅管理员可查']]),sel('query_permission.private_normal_user','私聊查询',[[true,'允许所有人查询'],[false,'仅管理员可查']]))+
+    sec('指令权限')+sel('advanced_config.modify_favour_permission','修改好感度最低权限',[['admin','群管理员及以上'],['owner','群主及以上'],['superuser','仅Bot管理员']]); }
 
 // ===== Tab: 高级 =====
 function adv() {
@@ -130,12 +135,161 @@ function cold() {
     card('自定义回复（{time_str}=剩余时间）',txt2('cold_violence_config.replies.on_trigger','触发时附加消息')+txt2('cold_violence_config.replies.on_message','拦截消息时回复')+txt2('cold_violence_config.replies.on_query','查询好感度时回复'));
 }
 
+// ===== Tab: 数据管理 =====
+function data() {
+  return `<div id="data-panel">
+    <div style="margin-bottom:12px"><input type="text" id="data-search" placeholder="🔍 搜索用户ID / 用户名 / 关系..." style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-size:0.9rem" oninput="filterDataTable()"></div>
+    <div class="dim">加载中...</div></div>`;
+}
+
+function filterDataTable() {
+  const q = (document.getElementById('data-search')?.value||'').toLowerCase();
+  $$('#data-panel .dt tbody tr').forEach(tr => {
+    const txt = tr.textContent.toLowerCase();
+    tr.style.display = q && !txt.includes(q) ? 'none' : '';
+  });
+  // 隐藏空的 group sections
+  $$('#data-panel .grp-section').forEach(sec => {
+    const vis = sec.querySelectorAll('tbody tr[style*="display: none"]').length;
+    const total = sec.querySelectorAll('tbody tr').length;
+    sec.style.display = vis === total ? 'none' : '';
+  });
+}
+
+async function loadDataPanel() {
+  let panel = null;
+  for (let i = 0; i < 5; i++) {
+    panel = document.getElementById('data-panel');
+    if (panel) break;
+    await new Promise(r => setTimeout(r, 10));
+  }
+  if (!panel) { console.error('[数据管理] data-panel 始终找不到'); return; }
+  try {
+    const json = await bridge.apiGet('datarecords');
+    const gl = json.global || [], ng = json.non_global || [];
+    let html = '';
+
+    // ---- 非全局数据（按会话分组） ----
+    html += '<div class="sec">📋 非全局数据（按会话分组）<span style="font-weight:400;font-size:0.8rem;margin-left:auto">共 ' + ng.length + ' 条 | ' + new Set(ng.map(r=>r.session_id)).size + ' 个会话</span></div>';
+    if (ng.length === 0) {
+      html += '<p class="dim">暂无数据</p>';
+    } else {
+      // 按平台+会话分组
+      const groups = {};
+      ng.forEach(r => {
+        const key = r.session_id || r.platform + ':私聊';
+        if (!groups[key]) groups[key] = { platform: r.platform, type: r.session_type, target: r.session_target, sid: r.session_id, rows: [] };
+        groups[key].rows.push(r);
+      });
+      // 排序：群聊在前，私聊在后
+      const sortedKeys = Object.keys(groups).sort((a,b) => {
+        const ga = groups[a], gb = groups[b];
+        if (ga.type !== gb.type) return ga.type === 'GroupMessage' ? -1 : 1;
+        return (ga.target||'').localeCompare(gb.target||'');
+      });
+
+      sortedKeys.forEach(key => {
+        const g = groups[key];
+        const label = g.type === 'GroupMessage' ? `👥 ${g.platform} 群 ${g.target}` : `💬 ${g.platform} 私聊`;
+        const uidHint = (g.sid||'').length > (g.platform.length+g.type.length+3) ? `<span style="font-weight:400;color:var(--td);font-size:0.7rem;word-break:break-all">UID: ${esc(g.sid)}</span>` : '';
+        html += `<div class="grp-section" style="margin-bottom:12px">
+          <div class="grp-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none';this.classList.toggle('open')" style="cursor:pointer;padding:8px 12px;background:var(--s2);border-radius:8px;font-weight:600;font-size:0.85rem;">
+            <div style="display:flex;align-items:center;gap:8px"><span style="transition:transform 0.2s;display:inline-block" class="grp-arrow">▶</span> ${esc(label)} <span style="font-weight:400;color:var(--td);font-size:0.75rem">${g.rows.length} 条</span></div>
+            ${uidHint}
+          </div>
+          <div class="tbl-wrap" style="display:block;margin-top:4px"><table class="dt"><thead><tr><th>用户ID</th><th>用户名</th><th>好感度</th><th>关系</th><th>唯一</th><th>操作</th></tr></thead><tbody>`;
+        g.rows.forEach(r => {
+          html += `<tr id="row-${r.id}">
+            <td>${esc(r.user_id)}</td>
+            <td contenteditable="true" class="ed" data-id="${r.id}" data-field="username">${esc(r.username)}</td>
+            <td><input type="number" class="in-sm" value="${r.favour}" data-id="${r.id}" data-field="favour"></td>
+            <td contenteditable="true" class="ed" data-id="${r.id}" data-field="relationship">${esc(r.relationship)}</td>
+            <td><input type="checkbox" data-id="${r.id}" data-field="is_unique" ${r.is_unique?'checked':''}></td>
+            <td><button class="btn-sm" data-act="save-row" data-id="${r.id}">💾</button> <button class="btn-sm btn-del" data-act="del-row" data-id="${r.id}">✕</button></td>
+          </tr>`;
+        });
+        html += '</tbody></table></div></div>';
+      });
+    }
+
+    // ---- 全局数据 ----
+    html += '<div class="sec" style="margin-top:24px">🌐 全局数据（跨会话）<span style="font-weight:400;font-size:0.8rem;margin-left:auto">共 ' + gl.length + ' 条</span></div>';
+    if (gl.length === 0) {
+      html += '<p class="dim">暂无数据</p>';
+    } else {
+      html += '<div class="tbl-wrap"><table class="dt"><thead><tr><th>适配器</th><th>用户ID</th><th>用户名</th><th>好感度</th><th>关系</th><th>唯一</th><th>操作</th></tr></thead><tbody>';
+      gl.forEach(r => {
+        html += `<tr id="row-${r.id}">
+          <td>全局</td>
+          <td>${esc(r.user_id)}</td>
+          <td contenteditable="true" class="ed" data-id="${r.id}" data-field="username">${esc(r.username)}</td>
+          <td><input type="number" class="in-sm" value="${r.favour}" data-id="${r.id}" data-field="favour"></td>
+          <td contenteditable="true" class="ed" data-id="${r.id}" data-field="relationship">${esc(r.relationship)}</td>
+          <td><input type="checkbox" data-id="${r.id}" data-field="is_unique" ${r.is_unique?'checked':''}></td>
+          <td><button class="btn-sm" data-act="save-row" data-id="${r.id}">💾</button> <button class="btn-sm btn-del" data-act="del-row" data-id="${r.id}">✕</button></td>
+        </tr>`;
+      });
+      html += '</tbody></table></div>';
+    }
+
+    html += '<button class="btn-sm btn-add" style="margin-top:12px" data-act="refresh-data">🔄 刷新数据</button>';
+    panel.innerHTML = html;
+    bindDataActions();
+  } catch (e) {
+    console.error('[数据管理] 加载失败:', e);
+    if (panel) panel.innerHTML = '<p class="dim" style="color:var(--r)">加载失败: ' + esc(e.message||String(e)) + '</p>';
+  }
+}
+
+function bindDataActions() {
+  $$('#data-panel [data-act="save-row"]').forEach(btn => {
+    btn.onclick = async () => {
+      const id = +btn.dataset.id;
+      const row = document.getElementById('row-' + id);
+      if (!row) return;
+      const updates = { action: 'update', id };
+      const inp = row.querySelector('input[data-field="favour"]');
+      if (inp) updates.favour = parseInt(inp.value) || 0;
+      const cb = row.querySelector('input[data-field="is_unique"]');
+      if (cb) updates.is_unique = cb.checked;
+      row.querySelectorAll('.ed').forEach(el => {
+        updates[el.dataset.field] = el.textContent.trim();
+      });
+      try {
+        const json = await bridge.apiPost('datarecords', updates);
+        if (json.success) { status('已保存 ✓', 'ok'); } else { status('保存失败: ' + (json.error || ''), 'err'); }
+      } catch (e) { status('请求失败: ' + e.message, 'err'); }
+    };
+  });
+  $$('#data-panel [data-act="del-row"]').forEach(btn => {
+    btn.onclick = async function() {
+      if (this.dataset.deleting === '1') {
+        // 二次点击确认删除
+        const id = +this.dataset.id;
+        try {
+          const json = await bridge.apiPost('datarecords', { action: 'delete', id });
+          if (json.success) { status('已删除 ✓', 'ok'); loadDataPanel(); } else { status('删除失败', 'err'); }
+        } catch (e) { status('请求失败: ' + e.message, 'err'); }
+      } else {
+        this.dataset.deleting = '1';
+        this.textContent = '✓确认';
+        this.style.color = '#fff';
+        this.style.background = 'var(--r)';
+        setTimeout(() => { this.dataset.deleting = '0'; this.textContent = '✕'; this.style.color = 'var(--r)'; this.style.background = ''; }, 3000);
+      }
+    };
+  });
+  const refreshBtn = document.querySelector('#data-panel [data-act="refresh-data"]');
+  if (refreshBtn) refreshBtn.onclick = () => loadDataPanel();
+}
+
 // ===== 收集 =====
 function collect() {
   $$('[data-p]').forEach(el => {
     const p = el.dataset.p;
     if (el.type === 'checkbox') s(p, el.checked);
     else if (el.type === 'number') { const v = el.value.trim(); s(p, v===''?null:parseFloat(v)); }
+    else if (el.tagName === 'SELECT') { const v = el.value.trim(); s(p, v==='true'?true:v==='false'?false:v); }
     else s(p, el.value);
   });
   const lg = {};

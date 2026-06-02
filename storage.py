@@ -24,6 +24,8 @@ class FavourRecord(SQLModel, table=True):
     favour: int = Field(default=0)
     relationship: str = Field(default="")
     is_unique: bool = Field(default=False)
+    username: str = Field(default="")  # 用户昵称，供 WebUI 数据管理展示
+    #################
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     last_interaction: datetime = Field(default_factory=datetime.now)  # 最后互动时间，用于衰减
@@ -46,6 +48,12 @@ class FavourDBManager:
         )
         self._initialized = False
         self._init_lock = asyncio.Lock()
+
+    def set_limits(self, min_val: int, max_val: int) -> None:
+        """热更新好感度边界（供 WebUI 配置保存后调用）。"""
+        self.min_val = min_val
+        self.max_val = max_val
+        logger.debug(f"[DB边界] 好感度上下限已更新为 [{min_val}, {max_val}]")
 
     async def init_db(self):
         """初始化数据库表并执行必要的迁移"""
@@ -78,6 +86,11 @@ class FavourDBManager:
                             await conn.execute(text("ALTER TABLE favour_records ADD COLUMN last_interaction DATETIME"))
                             await conn.execute(text("UPDATE favour_records SET last_interaction = updated_at WHERE last_interaction IS NULL"))
                             logger.info("数据库升级完成（last_interaction）。")
+                        if "username" not in columns:
+                            logger.info("正在升级数据库：添加 username 字段...")
+                            await conn.execute(text("ALTER TABLE favour_records ADD COLUMN username VARCHAR(128) DEFAULT ''"))
+                            logger.info("数据库升级完成（username）。")
+                            #################
 
                 self._initialized = True
                 logger.info(f"好感度数据库已初始化: {self.db_path}")
@@ -317,6 +330,43 @@ class FavourDBManager:
             stmt = select(FavourRecord).where(FavourRecord.session_id != "global")
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    async def get_all_records(self) -> List[FavourRecord]:
+        """获取全部记录（供 WebUI 数据管理使用）"""
+        #################
+        await self.init_db()
+        async with self.async_session() as session:
+            stmt = select(FavourRecord).order_by(FavourRecord.session_id, FavourRecord.user_id)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+    async def update_record(self, record_id: int, **kwargs) -> bool:
+        """更新指定记录的字段（favour, relationship, username 等）"""
+        #################
+        await self.init_db()
+        try:
+            async with self.async_session() as session:
+                stmt = update(FavourRecord).where(FavourRecord.id == record_id).values(**kwargs)
+                await session.execute(stmt)
+                await session.commit()
+            return True
+        except Exception as e:
+            logger.error(f"更新记录 {record_id} 失败: {e}")
+            return False
+
+    async def delete_record(self, record_id: int) -> bool:
+        """删除指定记录"""
+        #################
+        await self.init_db()
+        try:
+            async with self.async_session() as session:
+                stmt = delete(FavourRecord).where(FavourRecord.id == record_id)
+                await session.execute(stmt)
+                await session.commit()
+            return True
+        except Exception as e:
+            logger.error(f"删除记录 {record_id} 失败: {e}")
+            return False
 
     async def clear_session(self, session_id: Optional[str] = None) -> bool:
         """清空某会话记录"""
