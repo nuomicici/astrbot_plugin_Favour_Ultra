@@ -17,6 +17,9 @@
 https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/tree/older/
 
 ## 更新日志
+### v4.2.1 (2026-07-09)
+**修复**
+- 修复当[`好感度不处于已设置等级时，不告知LLM应如何应对`](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/16)的问题
 ### v4.2.0 (2026-07-09)
 **新增功能**
 - **数据库自动备份系统**：支持定时自动备份（可配置间隔与保留时长），WebUI「备份」Tab 提供创建/恢复/删除/下载备份的一站式管理
