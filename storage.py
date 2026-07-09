@@ -1,6 +1,9 @@
 # storage.py
+import os
+import time
 import json
 import asyncio
+import functools
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
@@ -10,8 +13,29 @@ from sqlmodel import SQLModel, Field, select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError as SAOperationalError
 from astrbot.api import logger
 from .utils import is_valid_userid
+
+
+def _retry_on_locked(max_retries: int = 3, base_delay: float = 0.3):
+    """装饰器：在遇到 SQLite database is locked 时自动重试。"""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except (SAOperationalError, Exception) as e:
+                    err_str = str(e).lower()
+                    if 'database is locked' in err_str and attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"[DB重试] database is locked，{delay:.1f}s 后重试 ({attempt+1}/{max_retries})")
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
+        return wrapper
+    return decorator
 
 # 定义数据库模型
 class FavourRecord(SQLModel, table=True):
@@ -41,8 +65,14 @@ class FavourDBManager:
         self.min_val = min_val
         self.max_val = max_val
         
-        # 创建异步引擎
-        self.engine = create_async_engine(self.db_url, echo=False)
+        # 创建异步引擎（优化 SQLite 并发：限制连接池 + busy timeout）
+        self.engine = create_async_engine(
+            self.db_url, 
+            echo=False,
+            connect_args={"timeout": 30},  # SQLite busy timeout 30秒，避免 database is locked
+            pool_size=1,       # SQLite 单文件数据库，限制为单连接
+            max_overflow=2,    # 允许少量溢出以应对突发并发
+        )
         self.async_session = sessionmaker(
             self.engine, class_=AsyncSession, expire_on_commit=False
         )
@@ -66,6 +96,10 @@ class FavourDBManager:
                 
             try:
                 async with self.engine.begin() as conn:
+                    # 启用 WAL 模式（提升并发读写性能，减少 database is locked）
+                    await conn.execute(text("PRAGMA journal_mode=WAL"))
+                    await conn.execute(text("PRAGMA busy_timeout=30000"))
+                    
                     # 检查表是否存在
                     result = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='favour_records'"))
                     table_exists = result.scalar() is not None
@@ -198,6 +232,7 @@ class FavourDBManager:
             result = await session.execute(stmt)
             return result.scalars().first()
 
+    @_retry_on_locked()
     async def update_favour(
         self, 
         user_id: str, 
@@ -253,6 +288,7 @@ class FavourDBManager:
             logger.error(f"更新数据库失败: {str(e)}")
             return False
 
+    @_retry_on_locked()
     async def update_user_all_records(
         self, 
         user_id: str, 
@@ -283,6 +319,7 @@ class FavourDBManager:
             logger.error(f"全局更新失败: {str(e)}")
             return 0
 
+    @_retry_on_locked()
     async def delete_favour(self, user_id: str, session_id: Optional[str] = None) -> Tuple[bool, str]:
         """删除单条记录"""
         await self.init_db()
@@ -340,6 +377,7 @@ class FavourDBManager:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
+    @_retry_on_locked()
     async def update_record(self, record_id: int, **kwargs) -> bool:
         """更新指定记录的字段（favour, relationship, username 等）"""
         #################
@@ -354,6 +392,7 @@ class FavourDBManager:
             logger.error(f"更新记录 {record_id} 失败: {e}")
             return False
 
+    @_retry_on_locked()
     async def delete_record(self, record_id: int) -> bool:
         """删除指定记录"""
         #################
@@ -368,6 +407,7 @@ class FavourDBManager:
             logger.error(f"删除记录 {record_id} 失败: {e}")
             return False
 
+    @_retry_on_locked()
     async def clear_session(self, session_id: Optional[str] = None) -> bool:
         """清空某会话记录"""
         await self.init_db()
@@ -382,6 +422,7 @@ class FavourDBManager:
             logger.error(f"清空会话记录失败: {str(e)}")
             return False
 
+    @_retry_on_locked()
     async def clear_all(self) -> bool:
         """清空所有记录"""
         await self.init_db()
@@ -462,6 +503,7 @@ class FavourDBManager:
         
         return results
 
+    @_retry_on_locked()
     async def apply_decay(self, user_id: str, session_id: str, decay_amount: int, floor: int = None) -> Optional[int]:
         """
         对指定记录应用衰减，返回衰减后的好感度值。
@@ -478,3 +520,127 @@ class FavourDBManager:
         new_favour = max(eff_floor, record.favour - decay_amount)
         await self.update_favour(user_id, session_id, favour=new_favour, touch_interaction=False)
         return new_favour
+
+    async def auto_backup(self) -> Optional[str]:
+        """自动备份所有记录"""
+        records = await self.get_all_records()
+        return await self.backup_data(records, "auto")
+
+    async def list_backups(self) -> List[dict]:
+        """列出所有备份文件"""
+        backup_dir = self.data_dir / "backups"
+        if not backup_dir.exists():
+            return []
+        
+        result = []
+        for f in backup_dir.iterdir():
+            if f.is_file() and f.suffix == ".json":
+                stat = f.stat()
+                # 从文件名解析时间戳，格式: prefix_YYYYMMDD_HHMMSS.json
+                created_iso = ""
+                try:
+                    parts = f.stem.rsplit("_", 2)
+                    if len(parts) >= 2:
+                        date_part = parts[-2]
+                        time_part = parts[-1]
+                        if len(date_part) == 8 and len(time_part) == 6:
+                            dt = datetime.strptime(f"{date_part}_{time_part}", "%Y%m%d_%H%M%S")
+                            created_iso = dt.isoformat()
+                except Exception:
+                    pass
+                
+                result.append({
+                    "filename": f.name,
+                    "size_kb": round(stat.st_size / 1024, 2),
+                    "created": created_iso,
+                    "path": str(f),
+                })
+        
+        result.sort(key=lambda x: x["filename"], reverse=True)
+        return result
+
+    @_retry_on_locked()
+    async def restore_backup(self, filename: str) -> Tuple[bool, str]:
+        """从备份文件恢复数据"""
+        # 验证文件名安全性
+        if ".." in filename or "/" in filename or "\\" in filename or not filename.endswith(".json"):
+            return False, "不安全的文件名"
+        
+        backup_path = self.data_dir / "backups" / filename
+        if not backup_path.exists():
+            return False, f"备份文件不存在: {filename}"
+        
+        try:
+            async with aio_open(backup_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+                data = json.loads(content)
+            
+            if not isinstance(data, list):
+                return False, "备份文件格式无效"
+            
+            await self.init_db()
+            async with self.async_session() as session:
+                async with session.begin():
+                    # 删除所有现有记录
+                    await session.execute(delete(FavourRecord))
+                    
+                    # 插入备份中的记录
+                    for item in data:
+                        record = FavourRecord(
+                            id=item.get("id"),
+                            user_id=item.get("user_id", ""),
+                            session_id=item.get("session_id", "global"),
+                            favour=item.get("favour", 0),
+                            relationship=item.get("relationship", ""),
+                            is_unique=item.get("is_unique", False),
+                            username=item.get("username", ""),
+                            created_at=datetime.fromisoformat(item["created_at"]) if item.get("created_at") else datetime.now(),
+                            updated_at=datetime.fromisoformat(item["updated_at"]) if item.get("updated_at") else datetime.now(),
+                            last_interaction=datetime.fromisoformat(item["last_interaction"]) if item.get("last_interaction") else datetime.now(),
+                        )
+                        session.add(record)
+            
+            return True, f"restored {len(data)} records"
+        except Exception as e:
+            logger.error(f"恢复备份失败: {e}")
+            return False, f"恢复失败: {str(e)}"
+
+    async def delete_backup(self, filename: str) -> Tuple[bool, str]:
+        """删除指定备份文件"""
+        # 验证文件名安全性
+        if ".." in filename or "/" in filename or "\\" in filename or not filename.endswith(".json"):
+            return False, "不安全的文件名"
+        
+        backup_path = self.data_dir / "backups" / filename
+        if not backup_path.exists():
+            return False, f"备份文件不存在: {filename}"
+        
+        try:
+            backup_path.unlink()
+            return True, "deleted"
+        except Exception as e:
+            logger.error(f"删除备份失败: {e}")
+            return False, f"删除失败: {str(e)}"
+
+    async def cleanup_old_backups(self, max_age_hours: int = 24):
+        """清理超过指定时间的旧备份文件"""
+        backup_dir = self.data_dir / "backups"
+        if not backup_dir.exists():
+            return
+        
+        now = time.time()
+        max_age_seconds = max_age_hours * 3600
+        cleaned = 0
+        
+        for f in backup_dir.iterdir():
+            if f.is_file() and f.suffix == ".json":
+                try:
+                    age = now - os.path.getmtime(str(f))
+                    if age > max_age_seconds:
+                        f.unlink()
+                        cleaned += 1
+                except Exception as e:
+                    logger.warning(f"清理备份文件失败 {f.name}: {e}")
+        
+        if cleaned > 0:
+            logger.info(f"[备份清理] 已清理 {cleaned} 个过期备份文件（超过 {max_age_hours}h）")

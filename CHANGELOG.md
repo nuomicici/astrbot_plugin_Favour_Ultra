@@ -1,5 +1,5 @@
 # 当前版本概要
-- 主要修了bug，添加了webui管理全部好感度的功能
+- 新增数据库自动备份系统，支持定时备份与恢复；WebUI 主题全面重构，支持暗色模式
 - 请注意，主动搭话功能暂时不完善，请等待修复
   
 # 更新须知
@@ -17,6 +17,26 @@
 https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/tree/older/
 
 ## 更新日志
+### v4.2.0 (2026-07-09)
+**新增功能**
+- **数据库自动备份系统**：支持定时自动备份（可配置间隔与保留时长），WebUI「备份」Tab 提供创建/恢复/删除/下载备份的一站式管理
+- **WebUI 暗色模式**：CSS 全面重构，采用 CSS 自定义属性 + `data-theme="dark"` 暗色主题，配色调整为 AstrBot 兼容蓝色系，使用系统字体替代 Google Fonts
+- **数据 Tab 增强**：支持简要/详细双视图切换、SID 关键字搜索过滤、按适配器平台分组展示
+
+**健壮性增强**
+- **SQLite 并发优化**：启用 WAL 日志模式 + `busy_timeout=30000`，配置连接池 (`pool_size=1, max_overflow=2`)，新增 `_retry_on_locked` 装饰器对所有写操作提供指数退避重试（最多 3 次），大幅降低高并发场景下 `database is locked` 错误
+
+**Bug 修复**
+- 修复自动拉黑时未调用 `event.stop_event()` 导致消息仍在传播的问题
+- 修复非 QQ 平台搭话 `_send_direct_active_chat` 缺少 `await` 的问题
+
+**性能优化**
+- 新增用户名缓存 (`_username_cache`)，避免每条消息都触发数据库写入以更新用户名
+
+**UI 调整**
+- 配置面板标题与保存按钮文案精简
+- 状态徽章初始态改为 `loading`
+
 ### v4.1.0 (2026-06-02)
 **Bug 修复**
 - 缺少 `terminate()` → 热重载后旧调度器泄漏，多实例并行

@@ -96,6 +96,12 @@ class FavourManagerTool(Star):
         self.active_chat_rules = active_conf.get("rules", [])
         self.active_chat_llm_prompt = active_conf.get("llm_prompt", "")
         
+        # 备份配置
+        backup_conf = self.config.get("backup", {})
+        self.backup_enabled = backup_conf.get("enabled", True)
+        self.backup_interval_hours = backup_conf.get("interval_hours", 3)
+        self.backup_retention_hours = backup_conf.get("retention_hours", 24)
+        
         # 查询权限配置
         query_perm = self.config.get("query_permission", {})
         self.query_group_normal = query_perm.get("group_normal_user", True)
@@ -103,6 +109,9 @@ class FavourManagerTool(Star):
         
         # 黑名单（被自动拉黑的用户 session 组合）
         self.auto_blacklisted: Set[str] = set()
+        
+        # 用户名缓存：避免每条消息都写入数据库更新用户名
+        self._username_cache: Dict[str, str] = {}  # key: "record_id" -> username
         
         # 存储每个会话的最近事件，供主动搭话使用
         self._last_events: Dict[str, AstrMessageEvent] = {}
@@ -141,6 +150,14 @@ class FavourManagerTool(Star):
             self._active_chat_task = asyncio.create_task(self._active_chat_scheduler())
         else:
             logger.debug("[初始化] 主动搭话已禁用")
+
+        # 启动备份调度器
+        self._backup_task: Optional[asyncio.Task] = None
+        if self.backup_enabled:
+            logger.debug(f"[初始化] 启动自动备份调度器（间隔={self.backup_interval_hours}h，留存={self.backup_retention_hours}h）")
+            self._backup_task = asyncio.create_task(self._backup_scheduler())
+        else:
+            logger.debug("[初始化] 自动备份已禁用")
 
         # 注册 WebUI Pages API
         self._register_page_apis()
@@ -207,7 +224,7 @@ class FavourManagerTool(Star):
     async def terminate(self):
         """插件卸载/重载时取消所有调度器任务，防止旧任务泄漏。"""
         #################
-        for task in (self._decay_task, self._active_chat_task):
+        for task in (self._decay_task, self._active_chat_task, self._backup_task):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -216,6 +233,7 @@ class FavourManagerTool(Star):
                     pass
         self._decay_task = None
         self._active_chat_task = None
+        self._backup_task = None
         logger.info("好感度插件调度器已全部取消。")
         #################
 
@@ -519,7 +537,7 @@ class FavourManagerTool(Star):
                                 else:
                                     # 直接调 LLM 生成搭话内容并分段发送
                                     logger.info(f"[搭话调度器] 非QQ平台直接发送 → 目标 {user_id} (会话 {session_id})，概率 {matched_prob}%")
-                                    self._send_direct_active_chat(session_id, prompt, record, user_id, sys_prompt)
+                                    await self._send_direct_active_chat(session_id, prompt, record, user_id, sys_prompt)
                                 #################
                             except Exception as send_err:
                                 logger.warning(f"主动搭话失败 ({user_id}): {send_err}")
@@ -531,6 +549,23 @@ class FavourManagerTool(Star):
             except Exception as e:
                 logger.error(f"主动搭话调度器出错: {e}\n{traceback.format_exc()}")
                 await asyncio.sleep(600)
+
+    async def _backup_scheduler(self):
+        """周期性自动备份调度器"""
+        try:
+            await asyncio.sleep(10)  # 启动延迟，等待数据库初始化
+            while True:
+                try:
+                    path = await self.db_manager.auto_backup()
+                    if path:
+                        logger.info(f"[自动备份] 已创建备份: {path}")
+                    # 清理过期备份
+                    await self.db_manager.cleanup_old_backups(self.backup_retention_hours)
+                except Exception as e:
+                    logger.error(f"[自动备份] 失败: {e}")
+                await asyncio.sleep(self.backup_interval_hours * 3600)
+        except asyncio.CancelledError:
+            logger.debug("[自动备份] 调度器已取消")
 
     async def _send_direct_active_chat(self, session_id: str, prompt: str,
                                         record, user_id: str, sys_prompt: str) -> None:
@@ -716,6 +751,13 @@ class FavourManagerTool(Star):
             ["GET", "POST"],
             "好感度数据管理（GET=查询, POST=更新/删除）"
         )
+        # 备份管理 API
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/backups",
+            self._api_backups,
+            ["GET", "POST"],
+            "备份管理（GET=列表, POST=恢复/删除/立即备份）"
+        )
 
     async def _api_get_config(self):
         """GET /config → 返回当前完整配置"""
@@ -831,6 +873,55 @@ class FavourManagerTool(Star):
             logger.error(f"数据管理操作失败: {e}\n{traceback.format_exc()}")
             return jsonify({"success": False, "error": str(e)}), 500
 
+    async def _api_backups(self):
+        """GET+POST /backups → 备份管理"""
+        from quart import request, jsonify
+        try:
+            if request.method == "GET":
+                backups = await self.db_manager.list_backups()
+                return jsonify({
+                    "backups": backups,
+                    "config": {
+                        "enabled": self.backup_enabled,
+                        "interval_hours": self.backup_interval_hours,
+                        "retention_hours": self.backup_retention_hours,
+                    }
+                })
+
+            data = await request.get_json()
+            if not data or "action" not in data:
+                return jsonify({"success": False, "error": "缺少 action"}), 400
+
+            action = data["action"]
+
+            if action == "backup_now":
+                path = await self.db_manager.auto_backup()
+                if path:
+                    await self.db_manager.cleanup_old_backups(self.backup_retention_hours)
+                    return jsonify({"success": True, "path": path})
+                return jsonify({"success": False, "error": "备份失败"})
+
+            elif action == "restore":
+                filename = data.get("filename", "")
+                if not filename:
+                    return jsonify({"success": False, "error": "缺少文件名"}), 400
+                ok, msg = await self.db_manager.restore_backup(filename)
+                return jsonify({"success": ok, "message": msg})
+
+            elif action == "delete":
+                filename = data.get("filename", "")
+                if not filename:
+                    return jsonify({"success": False, "error": "缺少文件名"}), 400
+                ok, msg = await self.db_manager.delete_backup(filename)
+                return jsonify({"success": ok, "message": msg})
+
+            else:
+                return jsonify({"success": False, "error": f"未知操作: {action}"}), 400
+
+        except Exception as e:
+            logger.error(f"备份管理操作失败: {e}\n{traceback.format_exc()}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
     def _reload_config_from_manager(self) -> None:
         """从 PluginConfigManager 重新加载配置到实例属性。"""
         cfg = self.config_mgr.config
@@ -885,6 +976,11 @@ class FavourManagerTool(Star):
         self.query_group_normal = qp.get("group_normal_user", True)
         self.query_private_normal = qp.get("private_normal_user", True)
 
+        backup_conf = cfg.get("backup", {})
+        self.backup_enabled = backup_conf.get("enabled", True)
+        self.backup_interval_hours = backup_conf.get("interval_hours", 3)
+        self.backup_retention_hours = backup_conf.get("retention_hours", 24)
+
         self._validate_config()
         
         # 同步 DB 层的边界（之前只在 __init__ 时传入，热重载后不会更新）
@@ -931,6 +1027,22 @@ class FavourManagerTool(Star):
             logger.info(f"主动搭话调度器已按新配置重启（间隔 {self.active_chat_interval}h，{self.active_chat_time_start}-{self.active_chat_time_end}）。")
         else:
             logger.info("主动搭话已禁用，调度器已停止。")
+
+        # 4. 取消旧的备份调度器
+        if self._backup_task and not self._backup_task.done():
+            self._backup_task.cancel()
+            try:
+                await self._backup_task
+            except asyncio.CancelledError:
+                pass
+        self._backup_task = None
+
+        # 5. 按新配置重启备份调度器
+        if self.backup_enabled:
+            self._backup_task = asyncio.create_task(self._backup_scheduler())
+            logger.info(f"备份调度器已按新配置重启（间隔 {self.backup_interval_hours}h，留存 {self.backup_retention_hours}h）。")
+        else:
+            logger.info("自动备份已禁用，备份调度器已停止。")
 
     def _get_target_uid(self, event: AstrMessageEvent, text_arg: str, raw_extra_args: str = "") -> Optional[str]:
         """获取目标用户ID，支持At和纯文本。
@@ -1213,8 +1325,9 @@ class FavourManagerTool(Star):
             # 检查自动拉黑
             blacklist_key = f"{session_id}:{user_id}" if session_id != "global" else user_id
             if blacklist_key in self.auto_blacklisted:
-                logger.debug(f"[Prompt注入] 用户 {user_id} 已被自动拉黑，跳过。")
-                return  # 已拉黑用户，不再处理其消息
+                logger.debug(f"[Prompt注入] 用户 {user_id} 已被自动拉黑，拦截消息。")
+                event.stop_event()
+                return
 
             # 检查冷暴力
             if self.enable_cold_violence:
@@ -1251,13 +1364,18 @@ class FavourManagerTool(Star):
             else:
                 admin_status = "普通用户"
 
-            # 异步更新用户名（供 WebUI 数据管理展示）
+            # 异步更新用户名（供 WebUI 数据管理展示，使用缓存避免每条消息都写库）
             #################
             if record and not is_synthetic:
                 try:
+                    cache_key = str(record.id)
+                    cached_name = self._username_cache.get(cache_key)
                     display_name = await self._get_user_display_name(event, user_id)
-                    if display_name and display_name != user_id and display_name != record.username:
-                        await self.db_manager.update_record(record.id, username=display_name)
+                    if (display_name and display_name != user_id 
+                            and display_name != record.username 
+                            and display_name != cached_name):
+                        self._username_cache[cache_key] = display_name
+                        asyncio.create_task(self.db_manager.update_record(record.id, username=display_name))
                 except Exception:
                     pass  # 非关键操作，静默失败
             #################
