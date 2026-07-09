@@ -3,15 +3,16 @@
 
 # 好感度/关系管理系统 (Favour Ultra)
 
-[![查看更新日志（v3.1.2）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](#更新日志) 
+[![查看更新日志（v4.2.0）](https://img.shields.io/badge/查看更新日志-blue?style=for-the-badge)](#更新日志) 
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
 <div align="left" style="width:70%">
 
-最新动态 (2026-06-01)
+最新动态 (2026-07-09)
 
-* **核心机制重大升级**：引入全新的 `<FavourDynamicContext>` 动态上下文注入，支持基于 XML 的精准逻辑门控制与人际关系演变。
+
+* **核心机制重大升级**：新增数据库自动备份系统，支持定时备份与一键恢复；WebUI 主题全面重构，支持暗色模式；SQLite 并发写入大幅增强。
 * **配置更新**：更新后旧有好感度规则失效，请务必前往webui进行配置检查和更新！
 * **必看！**：如果后台显示“无法识别好感度标签”，请先尝试在预设对话中添加如下内容并清空历史对话记录！（若无效请前往反馈）
 ```
@@ -38,6 +39,8 @@
 *   **上下文精准注入**：基于 `<FavourDynamicContext>` XML 结构，实时将好感度等级、好感上限、现有关系及排他约束注入 System Prompt，确保模型对话的人设稳定性。
 *   **可视化报表与冷暴力惩罚**：支持生成图片报表直观展示排行；多次好感度降低触发真实情绪模拟，直接拒回或敷衍用户。
 *   **SQLite 存储**：支持海量用户数据的高效读写、查询与多维度管理（全局/单群隔离模式）。
+*   **WebUI 配置面板**：全功能可视化配置与数据管理面板，支持暗色模式，所有参数零代码修改。
+*   **自动备份系统**：定时自动备份数据库，支持 WebUI 一键创建/恢复/删除/下载备份，保障数据安全。
 
 ---
 
@@ -155,6 +158,14 @@ git clone https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
 
 *   **数据库文件**：`data/plugin_data/astrbot_plugin_favour_ultra/favour.db`
 *   **自动迁移**：插件启动时会自动检测旧版的 `haogan.json` 等配置。旧数据会自动导入数据库，原文件将被重命名为 `.json.bak` 进行安全备份。
+
+### 🗄️ 备份系统
+
+插件内置自动备份机制，保障数据安全：
+
+*   **自动备份**：默认每 3 小时自动备份一次，备份文件保存于 `data/plugin_data/astrbot_plugin_favour_ultra/backups/` 目录
+*   **WebUI 管理**：在「备份」Tab 中可查看所有备份、手动创建备份、恢复历史备份或删除旧备份
+*   **配置项**：可在 WebUI 中调整备份间隔 (`interval_hours`) 与备份保留时长 (`retention_hours`)
 
 ---
 
