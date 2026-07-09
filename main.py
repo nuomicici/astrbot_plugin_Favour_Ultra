@@ -1254,7 +1254,8 @@ class FavourManagerTool(Star):
                     line += desc
                 return line
             else:
-                return f"- 当前好感度 {current_favour} 未能匹配任何已配置的等级区间，请检查好感度分级配置（当前 {len(self.favour_levels)} 个等级）。"
+                # === 兜底逻辑：未匹配任何等级区间，寻找最接近的等级 ===
+                return self._build_fallback_level_prompt(current_favour)
         
         # --- 旧行为：返回全部等级（兼容）---
         lines = ["- 好感度等级：根据好感度数值的高低，共分为以下等级。"]
@@ -1275,6 +1276,99 @@ class FavourManagerTool(Star):
             lines.append(line)
         
         return "\n".join(lines)
+
+    def _build_fallback_level_prompt(self, current_favour: int) -> str:
+        """兜底好感度等级：当好感度不处于任何已配置区间时，找到最接近的等级并构建提示。
+        
+        处理三种情况：
+        1. 好感度高于所有区间 → 参考最高区间，态度应更强于该等级
+        2. 好感度低于所有区间 → 参考最低区间，态度应更强于该等级
+        3. 好感度处于两个区间的间隙中 → 同时参考上下两个邻近等级，据此推断态度
+        """
+        if not self.favour_levels:
+            return f"- 当前好感度 {current_favour}，未配置任何好感度等级。"
+        
+        # 计算每个等级区间到当前好感度的距离，并记录方向
+        # distance > 0: 当前值高于该区间; distance < 0: 当前值低于该区间
+        level_distances = []
+        for lv in self.favour_levels:
+            min_val = lv.get("min", -999)
+            max_val = lv.get("max", 999)
+            if current_favour > max_val:
+                dist = current_favour - max_val
+                level_distances.append((dist, "above", lv))
+            elif current_favour < min_val:
+                dist = min_val - current_favour
+                level_distances.append((dist, "below", lv))
+            # 如果 min <= current_favour <= max，不应走到这里（已在上层匹配）
+        
+        if not level_distances:
+            return f"- 当前好感度 {current_favour}，等级匹配异常。"
+        
+        # 按距离排序
+        level_distances.sort(key=lambda x: x[0])
+        
+        nearest_dist, nearest_dir, nearest_lv = level_distances[0]
+        nearest_name = nearest_lv.get("name", "未知")
+        nearest_desc = nearest_lv.get("desc", "")
+        nearest_min = nearest_lv.get("min", 0)
+        nearest_max = nearest_lv.get("max", 0)
+        nearest_range = f"[{nearest_min}~{nearest_max}]" if nearest_min != nearest_max else f"[{nearest_min}]"
+        
+        # 检查是否处于两个区间的间隙中（同时存在一个above和一个below的邻近等级）
+        above_levels = [(d, lv) for d, direction, lv in level_distances if direction == "above"]
+        below_levels = [(d, lv) for d, direction, lv in level_distances if direction == "below"]
+        
+        if above_levels and below_levels:
+            # 处于间隙中：同时有高于某区间和低于某区间的情况
+            lower_dist, lower_lv = min(above_levels, key=lambda x: x[0])  # 当前值高于此区间
+            upper_dist, upper_lv = min(below_levels, key=lambda x: x[0])  # 当前值低于此区间
+            
+            lower_name = lower_lv.get("name", "未知")
+            lower_desc = lower_lv.get("desc", "")
+            lower_max = lower_lv.get("max", 0)
+            lower_min = lower_lv.get("min", 0)
+            lower_range = f"[{lower_min}~{lower_max}]" if lower_min != lower_max else f"[{lower_min}]"
+            
+            upper_name = upper_lv.get("name", "未知")
+            upper_desc = upper_lv.get("desc", "")
+            upper_min = upper_lv.get("min", 0)
+            upper_max = upper_lv.get("max", 0)
+            upper_range = f"[{upper_min}~{upper_max}]" if upper_min != upper_max else f"[{upper_min}]"
+            
+            lines = [
+                f"- 当前好感度 {current_favour} 不处于任何已知好感度分级中，"
+                f"处于两个相邻等级的间隙区域。",
+                f"  - 下方等级：`{lower_name}` {lower_range}（当前值高于该等级上界 {lower_dist} 点）。"
+                + (f"该等级描述：{lower_desc}" if lower_desc.strip() else ""),
+                f"  - 上方等级：`{upper_name}` {upper_range}（当前值低于该等级下界 {upper_dist} 点）。"
+                + (f"该等级描述：{upper_desc}" if upper_desc.strip() else ""),
+                f"  你的态度应介于「{lower_name}」与「{upper_name}」之间，"
+                f"根据当前好感度 {current_favour} 在两者间的相对位置自然过渡。"
+            ]
+            return "\n".join(lines)
+        else:
+            # 好感度超出所有区间的上界或下界
+            if nearest_dir == "above":
+                direction_desc = "高于"
+                attitude_hint = (
+                    f"当前好感度 {current_favour} 已超过最接近等级「{nearest_name}」的上界（{nearest_max}）{nearest_dist} 点。"
+                    f"你的态度应以「{nearest_name}」为基础，在该等级描述的情感方向上进一步加深。"
+                )
+            else:
+                direction_desc = "低于"
+                attitude_hint = (
+                    f"当前好感度 {current_favour} 低于最接近等级「{nearest_name}」的下界（{nearest_min}）{nearest_dist} 点。"
+                    f"你的态度应以「{nearest_name}」为基础，在该等级描述的情感方向上进一步加深。"
+                )
+            
+            lines = [
+                f"- 当前好感度 {current_favour} 不处于任何已知好感度分级中，"
+                f"{direction_desc}最接近的等级「{nearest_name}」{nearest_range}。",
+                f"  - 该等级描述：{nearest_desc}" if nearest_desc.strip() else "",
+                f"  - {attitude_hint}",
+            ]
+            return "\n".join(line for line in lines if line)
 
     def _extract_target_from_message(self, event: AstrMessageEvent, command_name: str) -> str:
         """从原始消息中提取命令后的目标参数。
