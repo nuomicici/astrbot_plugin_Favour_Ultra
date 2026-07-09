@@ -25,18 +25,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "min_favour_value": -200,
     "max_favour_value": 1000,
     "default_favour": 0,
-    "favour_rule_prompt": (
-        "- 好感度等级：根据好感度数值的高低，共分为七个等级。\n"
-        " - [-200~-151]：`极度厌恶`。当前等级下，无论用户说什么内容，你都会感到十分嫌弃。如果没有其他人请求，该等级用户无法提升好感度。\n"
-        " - [-150~-51]：`厌恶`。当前等级下，你对用户抱有很强烈的抗拒感，你会想尽办法不想与其发生交流。此该等级用户可以通过正向互动稍微恢复好感度。\n"
-        " - [-50~-1]：`反感`。当前等级下，你对用户的行为感到反感，会明显表现出自己对TA没有好感。此等级用户可以正常通过对话进行好感度增减。\n"
-        " - [0~149]：`普通`。当前等级下，你对用户的态度为\u201c普通朋友\u201d。你对于用户的态度很平淡，不会主动表现出喜爱或者厌恶情绪。但是如果用户对你做出冒犯的时，你会反感（降低好感度）。\n"
-        " - [150~299]：`喜欢`。当前等级下，你对于用户有一定的喜欢。用户的言语、动作主要不是特别冒犯，你都不会介意。此等级用户可以正常通过对话进行好感度增减。\n"
-        " - [300~449]：`亲密`。当前等级下，你几乎不会对用户的行为感到不适。用户做什么都会引起你的\u201c喜欢\u201d。（除非太过强硬，明显违背你的意愿）此等级用户可以正常通过对话进行好感度增减。\n"
-        " - [450~500]：`挚爱`。此等级为最高等级。你对用户抱有极深的感情，极为重视用户的每一句话。"
-    ),
 
     # 好感度分级配置（独立项目，默认7个分级）
+    #################
     "favour_levels": [
         {"min": -200, "max": -151, "name": "极度厌恶", "desc": "当前等级下，无论用户说什么内容，你都会感到十分嫌弃。如果没有其他人请求，该等级用户无法提升好感度。"},
         {"min": -150,  "max": -51, "name": "厌恶",     "desc": "当前等级下，你对用户抱有很强烈的抗拒感，你会想尽办法不想与其发生交流。此该等级用户可以通过正向互动稍微恢复好感度。"},
@@ -104,6 +95,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "level_threshold": 50,
         "blocked_sessions": [],
         "allowed_sessions": [],
+        # 修改好感度指令的最低权限：superuser=仅Bot管理员, owner=群主及以上, admin=管理员及以上
+        "modify_favour_permission": "admin",
     },
 
     # 冷暴力配置
@@ -266,9 +259,7 @@ class PluginConfigManager:
         simple_keys = [
             "favour_mode", "is_global_favour", "group_sort_by",
             "enable_cold_violence", "enable_relationship_table",
-            "min_favour_value", "max_favour_value", "default_favour",
-            "favour_rule_prompt",
-        ]
+            "min_favour_value", "max_favour_value", "default_favour"]
         for key in simple_keys:
             if key in old:
                 new_config[key] = old[key]
@@ -305,6 +296,9 @@ class PluginConfigManager:
             for k in new_config["advanced_config"]:
                 if k in adv:
                     new_config["advanced_config"][k] = adv[k]
+        # 兼容：旧版没有 modify_favour_permission → 保持默认 "admin"
+        if "modify_favour_permission" not in new_config.get("advanced_config", {}):
+            new_config["advanced_config"]["modify_favour_permission"] = "admin"
 
         # 冷暴力配置
         if "cold_violence_config" in old:
