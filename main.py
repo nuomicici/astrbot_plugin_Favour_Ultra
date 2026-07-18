@@ -2113,8 +2113,8 @@ class FavourManagerTool(Star):
             yield event.plain_result("修改失败，请检查日志。")
 
     @filter.command("修改关系")
-    async def modify_relationship(self, event: AstrMessageEvent, target: str, rel_name: str, is_unique: int):
-        """修改关系: /修改关系 @用户 挚友 1 (群主)"""
+    async def modify_relationship(self, event: AstrMessageEvent, target: str, rel_name: str, is_unique: int = 0):
+        """修改关系: /修改关系 @用户 挚友 [1/0] (群主)，is_unique 默认为 0（非唯一）"""
         if not await self._check_permission(event, PermLevel.OWNER):
             yield event.plain_result("权限不足！需要群主权限。")
             return
@@ -2183,8 +2183,8 @@ class FavourManagerTool(Star):
             yield event.plain_result("修改失败，请检查日志。")
 
     @filter.command("全局修改关系")
-    async def global_modify_rel(self, event: AstrMessageEvent, target: str, rel_name: str, is_unique: int):
-        """全局修改关系 (Bot管理员)"""
+    async def global_modify_rel(self, event: AstrMessageEvent, target: str, rel_name: str, is_unique: int = 0):
+        """全局修改关系 (Bot管理员)，is_unique 默认为 0（非唯一）"""
         if not await self._check_permission(event, PermLevel.SUPERUSER):
             yield event.plain_result("权限不足！仅Bot管理员可用。")
             return
