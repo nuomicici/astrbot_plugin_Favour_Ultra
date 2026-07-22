@@ -54,21 +54,21 @@ class FavourManagerTool(Star):
 
         # 高级配置
         adv_conf = self.config.get("advanced_config", {})
-        self.admin_default_favour = adv_conf.get("admin_default_favour", 50)
-        self.favour_envoys = adv_conf.get("favour_envoys", [])
-        self.favour_increase_min = adv_conf.get("favour_increase_min", 1)
-        self.favour_increase_max = adv_conf.get("favour_increase_max", 3)
-        self.favour_decrease_min = adv_conf.get("favour_decrease_min", 1)
-        self.favour_decrease_max = adv_conf.get("favour_decrease_max", 5)
-        self.perm_level_threshold = adv_conf.get("level_threshold", 50)
-        self.blocked_sessions = adv_conf.get("blocked_sessions", [])
-        self.allowed_sessions = adv_conf.get("allowed_sessions", [])
-        self.modify_favour_permission = adv_conf.get("modify_favour_permission", "admin")
+        self.admin_default_favour = adv_conf.get("admin_default_favour") or 50
+        self.favour_envoys = adv_conf.get("favour_envoys") or []
+        self.favour_increase_min = adv_conf.get("favour_increase_min") or 1
+        self.favour_increase_max = adv_conf.get("favour_increase_max") or 3
+        self.favour_decrease_min = adv_conf.get("favour_decrease_min") or 1
+        self.favour_decrease_max = adv_conf.get("favour_decrease_max") or 5
+        self.perm_level_threshold = adv_conf.get("level_threshold") or 50
+        self.blocked_sessions = adv_conf.get("blocked_sessions") or []
+        self.allowed_sessions = adv_conf.get("allowed_sessions") or []
+        self.modify_favour_permission = adv_conf.get("modify_favour_permission") or "admin"
 
         # 冷暴力配置
         cv_conf = self.config.get("cold_violence_config", {})
-        self.cold_violence_consecutive_threshold = cv_conf.get("consecutive_decrease_threshold", 3)
-        self.cold_violence_duration_minutes = cv_conf.get("duration_minutes", 60)
+        self.cold_violence_consecutive_threshold = cv_conf.get("consecutive_decrease_threshold") or 3
+        self.cold_violence_duration_minutes = cv_conf.get("duration_minutes") or 60
         self.cold_violence_is_global = cv_conf.get("is_global", False)
         self.cold_violence_auto_blacklist = cv_conf.get("auto_blacklist_on_min", False)
         self.cold_violence_replies = cv_conf.get("replies", {
@@ -81,8 +81,8 @@ class FavourManagerTool(Star):
         decay_conf = self.config.get("favour_decay", {})
         self.decay_enabled = decay_conf.get("enabled", False)
         self.decay_mode = decay_conf.get("mode", "linear")
-        self.decay_inactive_days = decay_conf.get("inactive_days", 7)
-        self.decay_amount = decay_conf.get("decay_amount", 5)
+        self.decay_inactive_days = decay_conf.get("inactive_days") or 7
+        self.decay_amount = decay_conf.get("decay_amount") or 5
         self.decay_floor = decay_conf.get("floor_favour")  # None = 使用 min_favour_value
         self.decay_advanced_rules = decay_conf.get("advanced_rules", [])
         self.decay_conf = decay_conf  # 保存完整配置供 storage 使用
@@ -92,15 +92,18 @@ class FavourManagerTool(Star):
         self.active_chat_enabled = active_conf.get("enabled", False)
         self.active_chat_time_start = active_conf.get("time_start", "08:00")
         self.active_chat_time_end = active_conf.get("time_end", "23:30")
-        self.active_chat_interval = active_conf.get("interval_hours", 2)
+        self.active_chat_interval = active_conf.get("interval_hours") or 2
+        self.active_chat_max_sessions = active_conf.get("max_sessions_per_round") or 0
+        self.active_chat_blocked_sessions = active_conf.get("blocked_sessions") or []
+        self.active_chat_allowed_sessions = active_conf.get("allowed_sessions") or []
         self.active_chat_rules = active_conf.get("rules", [])
         self.active_chat_llm_prompt = active_conf.get("llm_prompt", "")
         
         # 备份配置
         backup_conf = self.config.get("backup", {})
         self.backup_enabled = backup_conf.get("enabled", True)
-        self.backup_interval_hours = backup_conf.get("interval_hours", 3)
-        self.backup_retention_hours = backup_conf.get("retention_hours", 24)
+        self.backup_interval_hours = backup_conf.get("interval_hours") or 3
+        self.backup_retention_hours = backup_conf.get("retention_hours") or 24
         
         # 查询权限配置
         query_perm = self.config.get("query_permission", {})
@@ -314,7 +317,7 @@ class FavourManagerTool(Star):
                         decayed_count += 1
                         # 自动拉黑检查
                         if self.cold_violence_auto_blacklist and new_fav <= self.min_favour_value:
-                            blacklist_key = f"{record.session_id}:{record.user_id}" if record.session_id != "global" else record.user_id
+                            blacklist_key = f"{record.session_id}:{record.user_id}" if not self._is_shared_session(record.session_id) else record.user_id
                             self.auto_blacklisted.add(blacklist_key)
                             blacklisted_count += 1
                             logger.info(f"用户 {record.user_id} (会话 {record.session_id}) 好感度已达最低值 {self.min_favour_value}，已自动拉黑。")
@@ -376,10 +379,17 @@ class FavourManagerTool(Star):
                 # 按会话分组
                 session_groups: Dict[str, List[FavourRecord]] = {}
                 for record in all_records:
-                    sid = record.session_id if record.session_id != "global" else "global"
+                    sid = record.session_id
+                    
+                    # 搭话会话级黑白名单过滤
+                    if self.active_chat_allowed_sessions and sid not in self.active_chat_allowed_sessions:
+                        continue
+                    if sid in self.active_chat_blocked_sessions:
+                        continue
+                    
                     # 过滤冷暴力/拉黑用户
                     user_id = record.user_id
-                    blacklist_key = f"{sid}:{user_id}" if sid != "global" else user_id
+                    blacklist_key = f"{sid}:{user_id}" if not self._is_shared_session(sid) else user_id
                     if blacklist_key in self.auto_blacklisted:
                         continue
                     cv_key = self._get_cold_violence_key(user_id, sid)
@@ -398,10 +408,19 @@ class FavourManagerTool(Star):
                 # 对每个会话单独处理
                 total_sessions = len(session_groups)
                 total_candidates = sum(len(r) for r in session_groups.values())
-                logger.debug(f"[搭话调度器] 共 {total_sessions} 个会话，{total_candidates} 个候选用户，开始逐会话检查。")
+                max_sessions = self.active_chat_max_sessions if self.active_chat_max_sessions > 0 else total_sessions
+                logger.debug(f"[搭话调度器] 共 {total_sessions} 个会话，{total_candidates} 个候选用户，每轮上限 {max_sessions} 个会话，开始逐会话检查。")
+                
+                # 随机打乱会话顺序，避免固定会话总是优先被搭话
+                session_items = list(session_groups.items())
+                _random.shuffle(session_items)
                 
                 triggered_sessions = 0
-                for session_id, records in session_groups.items():
+                for session_id, records in session_items:
+                    # 检查是否已达本轮上限
+                    if triggered_sessions >= max_sessions:
+                        logger.debug(f"[搭话调度器] 已达本轮上限 {max_sessions} 个会话，停止。")
+                        break
                     # 按好感度降序排列，同好感度随机打乱
                     records.sort(key=lambda r: r.favour, reverse=True)
                     # 对同好感度的用户进行随机排列（Fisher-Yates 思想：分组后打乱）
@@ -440,6 +459,7 @@ class FavourManagerTool(Star):
                         # 按概率触发
                         if _random.randint(1, 100) <= matched_prob:
                             triggered = True
+                            triggered_sessions += 1
                             
                             # 使用合成事件推入框架管线（替代直接调用 LLM + send_message）
                             # 好处：persona、上下文、分段插件全部自动生效
@@ -674,8 +694,7 @@ class FavourManagerTool(Star):
                 while len(remaining) > 200:
                     # 在 150~200 字符范围内找逗号/分号
                     split_pos = -1
-                    search_start = max(150, len(remaining) - 200)
-                    for pos in range(min(200, len(remaining) - 1), search_start, -1):
+                    for pos in range(min(200, len(remaining) - 1), 150, -1):
                         if remaining[pos] in ('，', ',', '；', ';', '、'):
                             split_pos = pos + 1
                             break
@@ -822,7 +841,8 @@ class FavourManagerTool(Star):
                         "is_unique": r.is_unique,
                         "last_interaction": r.last_interaction.isoformat() if r.last_interaction else ""
                     }
-                    if r.session_id == "global":
+                    if self._is_shared_session(r.session_id):
+                        base["session_id"] = r.session_id
                         global_list.append(base)
                     else:
                         parts = r.session_id.split(":", 2)
@@ -937,20 +957,20 @@ class FavourManagerTool(Star):
         self.favour_levels = cfg.get("favour_levels", [])
 
         adv = cfg.get("advanced_config", {})
-        self.admin_default_favour = adv.get("admin_default_favour", 50)
-        self.favour_envoys = adv.get("favour_envoys", [])
-        self.favour_increase_min = adv.get("favour_increase_min", 1)
-        self.favour_increase_max = adv.get("favour_increase_max", 3)
-        self.favour_decrease_min = adv.get("favour_decrease_min", 1)
-        self.favour_decrease_max = adv.get("favour_decrease_max", 5)
-        self.perm_level_threshold = adv.get("level_threshold", 50)
-        self.blocked_sessions = adv.get("blocked_sessions", [])
-        self.allowed_sessions = adv.get("allowed_sessions", [])
-        self.modify_favour_permission = adv.get("modify_favour_permission", "admin")
+        self.admin_default_favour = adv.get("admin_default_favour") or 50
+        self.favour_envoys = adv.get("favour_envoys") or []
+        self.favour_increase_min = adv.get("favour_increase_min") or 1
+        self.favour_increase_max = adv.get("favour_increase_max") or 3
+        self.favour_decrease_min = adv.get("favour_decrease_min") or 1
+        self.favour_decrease_max = adv.get("favour_decrease_max") or 5
+        self.perm_level_threshold = adv.get("level_threshold") or 50
+        self.blocked_sessions = adv.get("blocked_sessions") or []
+        self.allowed_sessions = adv.get("allowed_sessions") or []
+        self.modify_favour_permission = adv.get("modify_favour_permission") or "admin"
 
         cv = cfg.get("cold_violence_config", {})
-        self.cold_violence_consecutive_threshold = cv.get("consecutive_decrease_threshold", 3)
-        self.cold_violence_duration_minutes = cv.get("duration_minutes", 60)
+        self.cold_violence_consecutive_threshold = cv.get("consecutive_decrease_threshold") or 3
+        self.cold_violence_duration_minutes = cv.get("duration_minutes") or 60
         self.cold_violence_is_global = cv.get("is_global", False)
         self.cold_violence_auto_blacklist = cv.get("auto_blacklist_on_min", False)
         self.cold_violence_replies = cv.get("replies", self.cold_violence_replies)
@@ -958,8 +978,8 @@ class FavourManagerTool(Star):
         dc = cfg.get("favour_decay", {})
         self.decay_enabled = dc.get("enabled", False)
         self.decay_mode = dc.get("mode", "linear")
-        self.decay_inactive_days = dc.get("inactive_days", 7)
-        self.decay_amount = dc.get("decay_amount", 5)
+        self.decay_inactive_days = dc.get("inactive_days") or 7
+        self.decay_amount = dc.get("decay_amount") or 5
         self.decay_floor = dc.get("floor_favour")
         self.decay_advanced_rules = dc.get("advanced_rules", [])
         self.decay_conf = dc
@@ -968,7 +988,10 @@ class FavourManagerTool(Star):
         self.active_chat_enabled = ac.get("enabled", False)
         self.active_chat_time_start = ac.get("time_start", "08:00")
         self.active_chat_time_end = ac.get("time_end", "23:30")
-        self.active_chat_interval = ac.get("interval_hours", 2)
+        self.active_chat_interval = ac.get("interval_hours") or 2
+        self.active_chat_max_sessions = ac.get("max_sessions_per_round") or 0
+        self.active_chat_blocked_sessions = ac.get("blocked_sessions") or []
+        self.active_chat_allowed_sessions = ac.get("allowed_sessions") or []
         self.active_chat_rules = ac.get("rules", [])
         self.active_chat_llm_prompt = ac.get("llm_prompt", "")
 
@@ -978,8 +1001,8 @@ class FavourManagerTool(Star):
 
         backup_conf = cfg.get("backup", {})
         self.backup_enabled = backup_conf.get("enabled", True)
-        self.backup_interval_hours = backup_conf.get("interval_hours", 3)
-        self.backup_retention_hours = backup_conf.get("retention_hours", 24)
+        self.backup_interval_hours = backup_conf.get("interval_hours") or 3
+        self.backup_retention_hours = backup_conf.get("retention_hours") or 24
 
         self._validate_config()
         
@@ -988,6 +1011,14 @@ class FavourManagerTool(Star):
 
 
     def _validate_config(self) -> None:
+        if self.min_favour_value is None:
+            self.min_favour_value = -200
+        if self.max_favour_value is None:
+            self.max_favour_value = 1000
+        if self.default_favour is None:
+            self.default_favour = 0
+        if self.admin_default_favour is None:
+            self.admin_default_favour = 50
         if self.min_favour_value >= self.max_favour_value:
              self.min_favour_value = -100
              self.max_favour_value = 100
@@ -1081,8 +1112,18 @@ class FavourManagerTool(Star):
 
     def _get_session_id(self, event: AstrMessageEvent) -> Optional[str]:
         if self.is_global_favour:
-            return "global"
+            # 按适配器共享：提取适配器前缀（如 "aiocqhttp"、"telegram"）
+            origin = event.unified_msg_origin
+            if origin and ":" in origin:
+                return origin.split(":")[0]
+            return origin or "global"
         return event.unified_msg_origin
+
+    @staticmethod
+    def _is_shared_session(session_id: str) -> bool:
+        """判断是否为共享会话（旧版 'global' 或新版适配器前缀如 'aiocqhttp'）。
+        共享会话的 session_id 不包含 ':'，而独立会话格式为 'platform:type:target'。"""
+        return ":" not in (session_id or "")
 
     def _escape_markdown(self, text: str) -> str:
         """转义 Markdown 特殊字符以防止表格错位或渲染错误"""
@@ -1144,9 +1185,17 @@ class FavourManagerTool(Star):
         user_id = str(event.get_sender_id())
         
         if not self.is_global_favour:
+            # 尝试从共享记录（旧版 "global" 或适配器前缀）获取初始好感度
             global_rec = await self.db_manager.get_favour(user_id, "global")
             if global_rec:
                 return max(self.min_favour_value, min(self.max_favour_value, global_rec.favour))
+            # 也尝试适配器前缀记录
+            origin = event.unified_msg_origin
+            if origin and ":" in origin:
+                adapter_prefix = origin.split(":")[0]
+                adapter_rec = await self.db_manager.get_favour(user_id, adapter_prefix)
+                if adapter_rec:
+                    return max(self.min_favour_value, min(self.max_favour_value, adapter_rec.favour))
 
         is_envoy = str(user_id) in [str(e) for e in self.favour_envoys]
         is_admin = await self._check_permission(event, PermLevel.OWNER) 
@@ -1390,7 +1439,7 @@ class FavourManagerTool(Star):
             user_id = str(event.get_sender_id())
 
             # 存储事件引用，供主动搭话合成事件使用
-            if session_id and session_id != "global":
+            if session_id and not self._is_shared_session(session_id):
                 self._last_events[session_id] = event
                 # 同时缓存平台级信息，兜底该平台其他无事件会话的搭话
                 #################
@@ -1408,7 +1457,7 @@ class FavourManagerTool(Star):
                 user_id = str(target_uid)
                 logger.debug(f"[搭话管线] 合成事件注入目标用户 {user_id} 的好感度/关系数据。")
 
-            if session_id != "global":
+            if not self._is_shared_session(session_id):
                 if self.allowed_sessions and session_id not in self.allowed_sessions:
                     logger.debug(f"[Prompt注入] 会话 {session_id} 不在白名单中，跳过。")
                     return
@@ -1417,7 +1466,7 @@ class FavourManagerTool(Star):
                     return
 
             # 检查自动拉黑
-            blacklist_key = f"{session_id}:{user_id}" if session_id != "global" else user_id
+            blacklist_key = f"{session_id}:{user_id}" if not self._is_shared_session(session_id) else user_id
             if blacklist_key in self.auto_blacklisted:
                 logger.debug(f"[Prompt注入] 用户 {user_id} 已被自动拉黑，拦截消息。")
                 event.stop_event()
@@ -1432,7 +1481,7 @@ class FavourManagerTool(Star):
                         remaining = expiry - datetime.now()
                         time_str = f"{int(remaining.total_seconds() // 60)}分"
                         logger.debug(f"[Prompt注入] 用户 {user_id} 处于冷暴力状态（剩余 {time_str}），拦截消息并回复。")
-                        reply = self.cold_violence_replies["on_message"].format(time_str=time_str)
+                        reply = self.cold_violence_replies["on_message"].replace("{time_str}", time_str)
                         await event.send(event.plain_result(reply))
                         event.stop_event()
                         return
@@ -1478,7 +1527,7 @@ class FavourManagerTool(Star):
             exclusive_prompt_addon = ""
             relationship_table_str = ""
             
-            if session_id != "global":
+            if not self._is_shared_session(session_id):
                 records = await self.db_manager.get_all_in_session(session_id)
                 
                 # 1. 排他性关系检查
@@ -1855,7 +1904,7 @@ class FavourManagerTool(Star):
             
             # 自动拉黑检查：好感度达到最低值时拉黑
             if self.cold_violence_auto_blacklist and new_fav <= self.min_favour_value:
-                blacklist_key = f"{session_id}:{target_user_id}" if session_id != "global" else target_user_id
+                blacklist_key = f"{session_id}:{target_user_id}" if not self._is_shared_session(session_id) else target_user_id
                 self.auto_blacklisted.add(blacklist_key)
                 logger.info(f"用户 {target_user_id} (会话 {session_id}) 好感度达到最低值 {self.min_favour_value}，已自动拉黑。")
             
@@ -1912,7 +1961,7 @@ class FavourManagerTool(Star):
                     remaining = expiry - datetime.now()
                     time_str = f"{int(remaining.total_seconds() // 60)}分"
                     logger.debug(f"[查询好感度] 用户 {user_id} 处于冷暴力状态（剩余 {time_str}），返回拦截回复。")
-                    msg = self.cold_violence_replies["on_query"].format(time_str=time_str)
+                    msg = self.cold_violence_replies["on_query"].replace("{time_str}", time_str)
                     yield event.plain_result(msg)
                     return
                 else:
@@ -1939,8 +1988,7 @@ class FavourManagerTool(Star):
             return
         #################
         if self.is_global_favour:
-            yield event.plain_result("当前为全局模式，此命令无效。请使用【查询全局好感度】。")
-            return
+            yield event.plain_result("当前为全局（适配器共享）模式，此命令显示当前适配器内所有好感度记录。请使用【查询全局好感度】查看全部。")
             
         session_id = self._get_session_id(event)
         records = await self.db_manager.get_all_in_session(session_id)
@@ -2390,7 +2438,7 @@ class FavourManagerTool(Star):
         removed = []
         cv_keys_to_remove = []
         for cv_key, expiry in list(self.cold_violence_users.items()):
-            if target_uid in cv_key:
+            if cv_key == target_uid or cv_key.endswith(":" + target_uid):
                 cv_keys_to_remove.append(cv_key)
                 removed.append(cv_key)
         
@@ -2399,12 +2447,12 @@ class FavourManagerTool(Star):
         
         # 同时重置连续降低计数
         for key in list(self.consecutive_decreases.keys()):
-            if target_uid in key:
+            if key == target_uid or key.endswith(":" + target_uid):
                 del self.consecutive_decreases[key]
         
         # 同时移除自动拉黑
         for key in list(self.auto_blacklisted):
-            if target_uid in key:
+            if key == target_uid or key.endswith(":" + target_uid):
                 self.auto_blacklisted.discard(key)
                 removed.append(f"auto_blacklist:{key}")
         

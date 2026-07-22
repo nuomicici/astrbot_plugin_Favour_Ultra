@@ -209,7 +209,7 @@ function active() {
   return sec('主动搭话') +
     row(chk('active_chat.enabled', '启用主动搭话', '根据好感度概率主动发起对话'), '') +
     row(txt2('active_chat.time_start', '开始时间 HH:MM'), txt2('active_chat.time_end', '结束时间 HH:MM')) +
-    num2('active_chat.interval_hours', '检查间隔（小时）') +
+    row(num2('active_chat.interval_hours', '检查间隔（小时）'), num2('active_chat.max_sessions_per_round', '每轮最多触发会话数（0=不限）')) +
     card('概率规则（按好感度区间，百分比）',
       lrHeader(['最低好感', '最高好感', '概率%'], ['80px', '80px', '70px']) +
       (rules.length ? rules.map((r, i) => lrRow([
@@ -219,6 +219,8 @@ function active() {
       ], 'del-act', i)).join('') : '<p class="dim">暂无规则</p>') +
       '<button class="btn-sm btn-add" data-act="add-act" style="margin-top:6px">+ 添加规则</button>'
     ) +
+    card('搭话会话黑名单', listEd('active_chat.blocked_sessions', g('active_chat.blocked_sessions', []), '会话ID')) +
+    card('搭话会话白名单（空=全部允许）', listEd('active_chat.allowed_sessions', g('active_chat.allowed_sessions', []), '会话ID')) +
     txt('active_chat.llm_prompt', 'LLM 搭话提示词 <span class="tip-icon" data-tip="占位符说明（点击固定提示）：\n{current_time} \u2014 当前系统时间\n{last_interaction_ago} \u2014 距上次互动时长\n{favour} \u2014 当前好感度数值\n{relationship} \u2014 当前关系\n{user_name} \u2014 用户 ID">?</span>', 6, '占位符：{current_time}, {last_interaction_ago}, {favour}, {relationship}, {user_name}');
 }
 

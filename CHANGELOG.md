@@ -17,6 +17,17 @@
 https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/tree/older/
 
 ## 更新日志
+### v4.2.2 (2026-07-22)
+- 合并 [#18](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/pull/18)：`/修改关系`、`/全局修改关系` 的 `is_unique` 默认 0，可省略
+- 修复 v3→v4 迁移时 min/max 好感度边界与分级错配（#19）
+- 修复备份配置为 null 时自动备份崩溃（#19）
+- 主动搭话：支持会话黑白名单与每轮会话上限；修复触发计数错误  
+  注意：主动搭话为实验性功能，请勿用于正式生产环境
+- 修复取消冷暴力时用户 ID 子串误匹配
+- 修复主动搭话长文本软分段在超长段上失效
+- 修复 Windows 下备份文件名含 `:` 等非法字符导致失败
+- 调整「全局好感度」：同一适配器实例内共享，不同适配器实例独立计数
+- 查询/数据管理逻辑同步适配新的共享会话标识（兼容旧 `global` 记录）
 ### v4.2.1 (2026-07-09)
 **修复**
 - 修复当[`好感度不处于已设置等级时，不告知LLM应如何应对`](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/16)的问题

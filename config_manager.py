@@ -5,6 +5,7 @@
 安装时若检测到旧版框架配置则迁移，否则按默认配置生成。
 """
 import json
+import copy
 import shutil
 import traceback
 from pathlib import Path
@@ -62,6 +63,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "time_start": "08:00",     # 允许搭话的时间范围起点
         "time_end": "23:30",       # 允许搭话的时间范围终点
         "interval_hours": 2,       # 每 N 小时检查一次
+        "max_sessions_per_round": 3,  # 每轮最多触发几个会话，0=不限制
+        # 会话级黑白名单：控制哪些会话允许/禁止主动搭话
+        "blocked_sessions": [],    # 黑名单：这些会话不会被主动搭话
+        "allowed_sessions": [],    # 白名单：为空=全部允许；非空=仅允许列出的会话
         # 按好感度区间分配触发概率（百分比），按 min_favour 从高到低匹配
         "rules": [
             {"min_favour": 90, "max_favour": 100, "probability": 15},
@@ -181,13 +186,13 @@ class PluginConfigManager:
                 with open(self.config_path, "r", encoding="utf-8-sig") as f:
                     loaded = json.load(f)
                 loaded = self._normalize_config_after_load(loaded)
-                self._config = self._deep_merge(DEFAULT_CONFIG.copy(), loaded)
+                self._config = self._deep_merge(copy.deepcopy(DEFAULT_CONFIG), loaded)
                 self._save()
                 logger.info(f"已加载插件配置: {self.config_path}")
                 return self._config
             except Exception as e:
                 logger.error(f"加载配置文件失败: {e}，将使用默认配置。")
-                self._config = DEFAULT_CONFIG.copy()
+                self._config = copy.deepcopy(DEFAULT_CONFIG)
                 self._save()
                 return self._config
 
@@ -210,7 +215,7 @@ class PluginConfigManager:
 
         # 无旧配置 → 按默认配置生成
         logger.info("未检测到旧配置，按默认配置生成新配置文件。")
-        self._config = DEFAULT_CONFIG.copy()
+        self._config = copy.deepcopy(DEFAULT_CONFIG)
         self._save()
         return self._config
 
@@ -253,16 +258,25 @@ class PluginConfigManager:
 
     def _migrate_old_config(self, old: Dict[str, Any]) -> Dict[str, Any]:
         """将旧版框架配置迁移为新版格式。"""
-        new_config = DEFAULT_CONFIG.copy()
+        new_config = copy.deepcopy(DEFAULT_CONFIG)
 
-        # 基础字段直接迁移
+        # 基础字段直接迁移（不含 min/max_favour_value，单独处理）
         simple_keys = [
             "favour_mode", "is_global_favour", "group_sort_by",
             "enable_cold_violence", "enable_relationship_table",
-            "min_favour_value", "max_favour_value", "default_favour"]
+            "default_favour"]
         for key in simple_keys:
             if key in old:
                 new_config[key] = old[key]
+
+        # min/max_favour_value 特殊处理：仅当旧值不是 v3.x 默认值时才迁移，
+        # 避免用旧版默认 -100/100 覆盖新版 -200/1000，导致 favour_levels 中的分级不可达
+        V3_DEFAULT_MIN = -100
+        V3_DEFAULT_MAX = 100
+        if "min_favour_value" in old and old["min_favour_value"] != V3_DEFAULT_MIN:
+            new_config["min_favour_value"] = old["min_favour_value"]
+        if "max_favour_value" in old and old["max_favour_value"] != V3_DEFAULT_MAX:
+            new_config["max_favour_value"] = old["max_favour_value"]
 
         # 好感度分级（支持从 WebUI JSON 编辑器来的字符串）
         if "favour_levels" in old:

@@ -1,5 +1,6 @@
 # storage.py
 import os
+import re
 import time
 import json
 import asyncio
@@ -202,8 +203,10 @@ class FavourDBManager:
         try:
             backup_dir = self.data_dir / "backups"
             backup_dir.mkdir(exist_ok=True)
+            # 清理文件名中的非法字符（Windows 不允许 : / \ 等）
+            safe_prefix = re.sub(r'[<>:"/\\|?*]', '_', prefix)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = backup_dir / f"{prefix}_{timestamp}.json"
+            filename = backup_dir / f"{safe_prefix}_{timestamp}.json"
             
             data_to_save = []
             for r in records:
@@ -353,18 +356,23 @@ class FavourDBManager:
             return list(result.scalars().all())
 
     async def get_global_records(self) -> List[FavourRecord]:
-        """仅获取全局记录"""
+        """获取所有共享记录（旧版 'global' 和新版适配器前缀如 'aiocqhttp'）。
+        共享记录的 session_id 不包含 ':'。"""
         await self.init_db()
         async with self.async_session() as session:
-            stmt = select(FavourRecord).where(FavourRecord.session_id == "global")
+            stmt = select(FavourRecord).where(
+                FavourRecord.session_id.not_like('%:%')
+            )
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
     async def get_non_global_records(self) -> List[FavourRecord]:
-        """获取所有非全局记录"""
+        """获取所有独立会话记录（session_id 包含 ':'，如 'aiocqhttp:GroupMessage:123'）"""
         await self.init_db()
         async with self.async_session() as session:
-            stmt = select(FavourRecord).where(FavourRecord.session_id != "global")
+            stmt = select(FavourRecord).where(
+                FavourRecord.session_id.like('%:%')
+            )
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
