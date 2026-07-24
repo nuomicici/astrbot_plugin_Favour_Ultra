@@ -17,6 +17,11 @@
 https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/tree/older/
 
 ## 更新日志
+### v4.3.0 (2026-07-24)
+- 在现有配置中心 WebUI 新增「迁移同步」分页（不重写原 Pages）
+- 支持按 UMO 一键复制/迁移会话数据（user_id、好感度、关系、唯一性、昵称等；仅 session_id 替换）
+- 支持会话完全同步：配置 A/B 两 UMO 后双向实时同步变更（含 WebChat `/api/v1/chat` 会话）
+- 同步对支持立即全量 merge（A→B / B→A / 双向）
 ### v4.2.2 (2026-07-22)
 - 合并 [#18](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/pull/18)：`/修改关系`、`/全局修改关系` 的 `is_unique` 默认 0，可省略
 - 修复 v3→v4 迁移时 min/max 好感度边界与分级错配（#19）

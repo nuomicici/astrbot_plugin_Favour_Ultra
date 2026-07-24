@@ -104,6 +104,11 @@ class FavourManagerTool(Star):
         self.backup_enabled = backup_conf.get("enabled", True)
         self.backup_interval_hours = backup_conf.get("interval_hours") or 3
         self.backup_retention_hours = backup_conf.get("retention_hours") or 24
+
+        # 会话完全同步配置（成对 UMO 双向同步）
+        sync_conf = self.config.get("session_sync", {})
+        self.session_sync_pairs = sync_conf.get("pairs") or []
+        self._sync_propagating = False  # 防止同步递归
         
         # 查询权限配置
         query_perm = self.config.get("query_permission", {})
@@ -315,6 +320,11 @@ class FavourManagerTool(Star):
                     )
                     if new_fav is not None:
                         decayed_count += 1
+                        # 衰减结果同步到配对会话
+                        await self._propagate_favour_sync(
+                            record.user_id, record.session_id,
+                            favour=new_fav, touch_interaction=False,
+                        )
                         # 自动拉黑检查
                         if self.cold_violence_auto_blacklist and new_fav <= self.min_favour_value:
                             blacklist_key = f"{record.session_id}:{record.user_id}" if not self._is_shared_session(record.session_id) else record.user_id
@@ -777,6 +787,19 @@ class FavourManagerTool(Star):
             ["GET", "POST"],
             "备份管理（GET=列表, POST=恢复/删除/立即备份）"
         )
+        # 会话迁移/复制/同步 API
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/sessions",
+            self._api_sessions,
+            ["GET", "POST"],
+            "会话列表/预览/复制/迁移"
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/session_sync",
+            self._api_session_sync,
+            ["GET", "POST"],
+            "会话完全同步对管理"
+        )
 
     async def _api_get_config(self):
         """GET /config → 返回当前完整配置"""
@@ -863,9 +886,14 @@ class FavourManagerTool(Star):
             record_id = int(data["id"])
 
             if action == "delete":
+                # 删除前取出记录以便同步配对会话
+                all_recs = await self.db_manager.get_all_records()
+                victim = next((r for r in all_recs if r.id == record_id), None)
                 ok = await self.db_manager.delete_record(record_id)
                 if ok:
                     logger.info(f"[数据管理] 已删除记录 #{record_id}")
+                    if victim:
+                        await self._propagate_favour_sync(victim.user_id, victim.session_id, delete=True)
                 return jsonify({"success": ok})
 
             elif action == "update":
@@ -881,9 +909,19 @@ class FavourManagerTool(Star):
                         updates[field] = val
                 if not updates:
                     return jsonify({"success": False, "error": "无可更新字段"}), 400
+                # 更新前取 session/user 以便同步
+                all_recs = await self.db_manager.get_all_records()
+                src_rec = next((r for r in all_recs if r.id == record_id), None)
                 ok = await self.db_manager.update_record(record_id, **updates)
                 if ok:
                     logger.info(f"[数据管理] 已更新记录 #{record_id}: {updates}")
+                    if src_rec:
+                        await self._propagate_favour_sync(
+                            src_rec.user_id, src_rec.session_id,
+                            favour=updates.get("favour"),
+                            relationship=updates.get("relationship"),
+                            is_unique=updates.get("is_unique"),
+                        )
                 return jsonify({"success": ok})
 
             else:
@@ -940,6 +978,268 @@ class FavourManagerTool(Star):
 
         except Exception as e:
             logger.error(f"备份管理操作失败: {e}\n{traceback.format_exc()}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    # ==================== 会话迁移 / 复制 / 完全同步 ====================
+
+    def _normalize_umo(self, umo: str) -> str:
+        """规范化 UMO（去空白）。支持 webchat / 各平台适配器会话 ID。"""
+        return (umo or "").strip()
+
+    def _get_sync_partners(self, session_id: str) -> List[str]:
+        """返回与 session_id 完全同步的配对 UMO 列表（双向）。"""
+        sid = self._normalize_umo(session_id)
+        if not sid:
+            return []
+        partners: List[str] = []
+        for pair in (self.session_sync_pairs or []):
+            if not pair or not pair.get("enabled", True):
+                continue
+            a = self._normalize_umo(pair.get("a", ""))
+            b = self._normalize_umo(pair.get("b", ""))
+            if not a or not b or a == b:
+                continue
+            if sid == a and b not in partners:
+                partners.append(b)
+            elif sid == b and a not in partners:
+                partners.append(a)
+        return partners
+
+    async def _write_favour(
+        self,
+        user_id: str,
+        session_id: Optional[str],
+        favour: Optional[int] = None,
+        relationship: Optional[str] = None,
+        is_unique: Optional[bool] = None,
+        touch_interaction: bool = True,
+        propagate: bool = True,
+    ) -> bool:
+        """写入好感度并按需双向同步到配对会话。"""
+        ok = await self.db_manager.update_favour(
+            user_id, session_id, favour=favour, relationship=relationship,
+            is_unique=is_unique, touch_interaction=touch_interaction,
+        )
+        if ok and propagate and not self._sync_propagating:
+            await self._propagate_favour_sync(
+                user_id, session_id, favour=favour, relationship=relationship,
+                is_unique=is_unique, touch_interaction=touch_interaction,
+            )
+        return ok
+
+    async def _propagate_favour_sync(
+        self,
+        user_id: str,
+        session_id: Optional[str],
+        favour: Optional[int] = None,
+        relationship: Optional[str] = None,
+        is_unique: Optional[bool] = None,
+        touch_interaction: bool = True,
+        delete: bool = False,
+    ) -> None:
+        """将变更同步到配对会话（不递归）。"""
+        if self._sync_propagating or not session_id:
+            return
+        partners = self._get_sync_partners(session_id)
+        if not partners:
+            return
+        self._sync_propagating = True
+        try:
+            for partner in partners:
+                try:
+                    if delete:
+                        await self.db_manager.delete_favour(user_id, partner)
+                        logger.debug(f"[会话同步] 删除 {user_id} @ {session_id} → {partner}")
+                    else:
+                        # 若调用方只改了部分字段，从源会话读完整快照再写入目标
+                        src = await self.db_manager.get_favour(user_id, session_id)
+                        if src:
+                            await self.db_manager.update_favour(
+                                user_id, partner,
+                                favour=src.favour if favour is None else favour,
+                                relationship=src.relationship if relationship is None else relationship,
+                                is_unique=src.is_unique if is_unique is None else is_unique,
+                                touch_interaction=touch_interaction,
+                            )
+                            # 同步用户名
+                            if src.username:
+                                tgt = await self.db_manager.get_favour(user_id, partner)
+                                if tgt and tgt.id:
+                                    await self.db_manager.update_record(
+                                        tgt.id, username=src.username,
+                                        last_interaction=src.last_interaction,
+                                    )
+                        else:
+                            await self.db_manager.update_favour(
+                                user_id, partner, favour=favour,
+                                relationship=relationship, is_unique=is_unique,
+                                touch_interaction=touch_interaction,
+                            )
+                        logger.debug(f"[会话同步] 写入 {user_id} @ {session_id} → {partner}")
+                except Exception as e:
+                    logger.warning(f"[会话同步] 同步到 {partner} 失败: {e}")
+        finally:
+            self._sync_propagating = False
+
+    def _save_session_sync_pairs(self, pairs: List[Dict]) -> bool:
+        """校验并持久化同步对到配置。"""
+        cleaned = []
+        for p in pairs or []:
+            a = self._normalize_umo(p.get("a", ""))
+            b = self._normalize_umo(p.get("b", ""))
+            if not a or not b or a == b:
+                continue
+            cleaned.append({
+                "a": a,
+                "b": b,
+                "enabled": bool(p.get("enabled", True)),
+                "note": str(p.get("note", "") or ""),
+            })
+        cfg = self.config_mgr.config
+        if "session_sync" not in cfg:
+            cfg["session_sync"] = {}
+        cfg["session_sync"]["pairs"] = cleaned
+        self.config_mgr._config = cfg
+        self.config_mgr.save()
+        self.session_sync_pairs = cleaned
+        return True
+
+    async def _api_sessions(self):
+        """GET/POST /sessions → 会话列表、预览、复制、迁移。"""
+        from quart import request, jsonify
+        try:
+            if request.method == "GET":
+                sessions = await self.db_manager.list_sessions()
+                # 补充运行时缓存中见过但尚无 DB 记录的 UMO（如 webchat）
+                known = {s["session_id"] for s in sessions}
+                for sid in list(self._last_events.keys()):
+                    if sid and sid not in known:
+                        sessions.append({
+                            "session_id": sid,
+                            "count": 0,
+                            "platform": sid.split(":")[0] if ":" in sid else sid,
+                            "session_type": sid.split(":")[1] if sid.count(":") >= 1 else "",
+                            "session_target": sid.split(":")[2] if sid.count(":") >= 2 else "",
+                            "is_shared": ":" not in sid,
+                            "from_cache": True,
+                        })
+                return jsonify({"sessions": sessions})
+
+            data = await request.get_json()
+            if not data or "action" not in data:
+                return jsonify({"success": False, "error": "缺少 action"}), 400
+
+            action = data["action"]
+            source = self._normalize_umo(data.get("source", "") or data.get("source_umo", ""))
+            target = self._normalize_umo(data.get("target", "") or data.get("target_umo", ""))
+            mode = data.get("mode", "merge")
+            if mode not in ("merge", "replace"):
+                mode = "merge"
+
+            if action == "preview":
+                if not source:
+                    return jsonify({"success": False, "error": "缺少 source UMO"}), 400
+                preview = await self.db_manager.preview_session(source)
+                return jsonify({"success": True, **preview})
+
+            if action == "copy":
+                ok, msg, count = await self.db_manager.copy_session(source, target, mode=mode)
+                return jsonify({"success": ok, "message": msg, "count": count})
+
+            if action == "migrate":
+                ok, msg, count = await self.db_manager.migrate_session(source, target, mode=mode)
+                return jsonify({"success": ok, "message": msg, "count": count})
+
+            return jsonify({"success": False, "error": f"未知操作: {action}"}), 400
+        except Exception as e:
+            logger.error(f"会话操作失败: {e}\n{traceback.format_exc()}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    async def _api_session_sync(self):
+        """GET/POST /session_sync → 完全同步对管理。"""
+        from quart import request, jsonify
+        try:
+            if request.method == "GET":
+                return jsonify({
+                    "pairs": self.session_sync_pairs or [],
+                    "hint": (
+                        "UMO 格式: platform:MessageType:target_id\n"
+                        "示例 QQ群: aiocqhttp:GroupMessage:123456789\n"
+                        "示例 WebChat: webchat:FriendMessage:<session_id>\n"
+                        "可从 /api/v1/chat 对话会话或插件日志中的 session_id 获取。"
+                    ),
+                })
+
+            data = await request.get_json()
+            if not data or "action" not in data:
+                return jsonify({"success": False, "error": "缺少 action"}), 400
+
+            action = data["action"]
+
+            if action == "save":
+                pairs = data.get("pairs", [])
+                if not isinstance(pairs, list):
+                    return jsonify({"success": False, "error": "pairs 必须是数组"}), 400
+                self._save_session_sync_pairs(pairs)
+                return jsonify({"success": True, "pairs": self.session_sync_pairs})
+
+            if action == "add":
+                a = self._normalize_umo(data.get("a", ""))
+                b = self._normalize_umo(data.get("b", ""))
+                if not a or not b or a == b:
+                    return jsonify({"success": False, "error": "需要两个不同的 UMO（a/b）"}), 400
+                pairs = list(self.session_sync_pairs or [])
+                # 去重（无向）
+                for p in pairs:
+                    pa, pb = self._normalize_umo(p.get("a", "")), self._normalize_umo(p.get("b", ""))
+                    if {pa, pb} == {a, b}:
+                        return jsonify({"success": False, "error": "该同步对已存在"}), 400
+                pairs.append({
+                    "a": a, "b": b,
+                    "enabled": bool(data.get("enabled", True)),
+                    "note": str(data.get("note", "") or ""),
+                })
+                self._save_session_sync_pairs(pairs)
+                return jsonify({"success": True, "pairs": self.session_sync_pairs})
+
+            if action == "remove":
+                idx = data.get("index")
+                pairs = list(self.session_sync_pairs or [])
+                if idx is None or not isinstance(idx, int) or idx < 0 or idx >= len(pairs):
+                    return jsonify({"success": False, "error": "无效 index"}), 400
+                pairs.pop(idx)
+                self._save_session_sync_pairs(pairs)
+                return jsonify({"success": True, "pairs": self.session_sync_pairs})
+
+            if action == "toggle":
+                idx = data.get("index")
+                pairs = list(self.session_sync_pairs or [])
+                if idx is None or not isinstance(idx, int) or idx < 0 or idx >= len(pairs):
+                    return jsonify({"success": False, "error": "无效 index"}), 400
+                pairs[idx]["enabled"] = not pairs[idx].get("enabled", True)
+                self._save_session_sync_pairs(pairs)
+                return jsonify({"success": True, "pairs": self.session_sync_pairs})
+
+            if action == "sync_now":
+                # 立即将 a 的全量数据 merge 到 b，再将 b merge 到 a（取各自最新？）
+                # 简化：以 a 为源覆盖 b，再可选 reverse
+                a = self._normalize_umo(data.get("a", ""))
+                b = self._normalize_umo(data.get("b", ""))
+                direction = data.get("direction", "a_to_b")  # a_to_b | b_to_a | both
+                if not a or not b:
+                    return jsonify({"success": False, "error": "缺少 a/b UMO"}), 400
+                results = []
+                if direction in ("a_to_b", "both"):
+                    ok, msg, cnt = await self.db_manager.copy_session(a, b, mode="merge")
+                    results.append({"dir": "a→b", "success": ok, "message": msg, "count": cnt})
+                if direction in ("b_to_a", "both"):
+                    ok, msg, cnt = await self.db_manager.copy_session(b, a, mode="merge")
+                    results.append({"dir": "b→a", "success": ok, "message": msg, "count": cnt})
+                return jsonify({"success": all(r["success"] for r in results) if results else False, "results": results})
+
+            return jsonify({"success": False, "error": f"未知操作: {action}"}), 400
+        except Exception as e:
+            logger.error(f"会话同步管理失败: {e}\n{traceback.format_exc()}")
             return jsonify({"success": False, "error": str(e)}), 500
 
     def _reload_config_from_manager(self) -> None:
@@ -1003,6 +1303,9 @@ class FavourManagerTool(Star):
         self.backup_enabled = backup_conf.get("enabled", True)
         self.backup_interval_hours = backup_conf.get("interval_hours") or 3
         self.backup_retention_hours = backup_conf.get("retention_hours") or 24
+
+        sync_conf = cfg.get("session_sync", {})
+        self.session_sync_pairs = sync_conf.get("pairs") or []
 
         self._validate_config()
         
@@ -1889,7 +2192,7 @@ class FavourManagerTool(Star):
                 rel = ""
                 uniq = False
                 
-            await self.db_manager.update_favour(target_user_id, session_id, new_fav, rel, uniq)
+            await self._write_favour(target_user_id, session_id, new_fav, rel, uniq)
             
             log_msg = f"用户 {target_user_id} (会话 {session_id}) 数据更新: 好感度 {old_fav}->{new_fav} (Δ{data['change']})"
             if data.get('dissolve'):
@@ -2146,7 +2449,7 @@ class FavourManagerTool(Star):
         orig_value = value
         clamped_value = max(self.min_favour_value, min(self.max_favour_value, value))
         try:
-            await self.db_manager.update_favour(uid, session_id, favour=clamped_value)
+            await self._write_favour(uid, session_id, favour=clamped_value)
             logger.debug(f"[修改好感度] 操作者={event.get_sender_id()}，目标={uid}，会话={session_id}，输入值={orig_value}，实际={clamped_value}")
             if orig_value != clamped_value:
                 yield event.plain_result(
@@ -2175,7 +2478,7 @@ class FavourManagerTool(Star):
         session_id = self._get_session_id(event)
         unique_bool = bool(is_unique)
         try:
-            await self.db_manager.update_favour(uid, session_id, relationship=rel_name, is_unique=unique_bool)
+            await self._write_favour(uid, session_id, relationship=rel_name, is_unique=unique_bool)
             yield event.plain_result(f"已更新用户 {uid} 关系为 {rel_name} (唯一: {unique_bool})。")
             logger.info(f"管理员 {event.get_sender_id()} 修改用户 {uid} 关系为 {rel_name}")
         except Exception as e:
@@ -2196,7 +2499,7 @@ class FavourManagerTool(Star):
             
         session_id = self._get_session_id(event)
         try:
-            await self.db_manager.update_favour(uid, session_id, relationship="", is_unique=False)
+            await self._write_favour(uid, session_id, relationship="", is_unique=False)
             yield event.plain_result(f"已解除用户 {uid} 的所有关系。")
             logger.info(f"管理员 {event.get_sender_id()} 解除用户 {uid} 关系")
         except Exception as e:
@@ -2286,7 +2589,7 @@ class FavourManagerTool(Star):
                 val = int(arg1)
                 orig_val = val
                 clamped_val = max(self.min_favour_value, min(self.max_favour_value, val))
-                await self.db_manager.update_favour(target_uid, target_sid, favour=clamped_val)
+                await self._write_favour(target_uid, target_sid, favour=clamped_val)
                 if orig_val != clamped_val:
                     yield event.plain_result(
                         f"⚠️ 输入值 {orig_val} 超出允许范围 [{self.min_favour_value}, {self.max_favour_value}]，"
@@ -2302,12 +2605,12 @@ class FavourManagerTool(Star):
                     return
                 rel_name = arg1
                 is_unique = bool(int(arg2)) if arg2.isdigit() else False
-                await self.db_manager.update_favour(target_uid, target_sid, relationship=rel_name, is_unique=is_unique)
+                await self._write_favour(target_uid, target_sid, relationship=rel_name, is_unique=is_unique)
                 yield event.plain_result(f"已更新会话 {target_sid} 中用户 {target_uid} 的关系为 {rel_name} (唯一: {is_unique})。")
                 logger.info(f"Bot管理员 {event.get_sender_id()} 跨会话修改 {target_sid} 用户 {target_uid} 关系为 {rel_name}")
 
             elif operation == "解除关系":
-                await self.db_manager.update_favour(target_uid, target_sid, relationship="", is_unique=False)
+                await self._write_favour(target_uid, target_sid, relationship="", is_unique=False)
                 yield event.plain_result(f"已解除会话 {target_sid} 中用户 {target_uid} 的所有关系。")
                 logger.info(f"Bot管理员 {event.get_sender_id()} 跨会话解除 {target_sid} 用户 {target_uid} 关系")
 
@@ -2341,6 +2644,7 @@ class FavourManagerTool(Star):
                 if record:
                     backup_file = await self.db_manager.backup_data([record], f"backup_user_{uid}_{sid}")
                     await self.db_manager.delete_favour(uid, sid)
+                    await self._propagate_favour_sync(uid, sid, delete=True)
                     await evt.send(evt.plain_result(f"✅ 已清空用户 {uid} 的好感度数据。"))
                     logger.info(f"管理员 {evt.get_sender_id()} 清空了用户 {uid} 在会话 {sid} 的好感度\n备份文件已保存至: {backup_file}")
                 else:

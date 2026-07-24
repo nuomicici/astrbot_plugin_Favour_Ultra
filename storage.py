@@ -652,3 +652,132 @@ class FavourDBManager:
         
         if cleaned > 0:
             logger.info(f"[备份清理] 已清理 {cleaned} 个过期备份文件（超过 {max_age_hours}h）")
+
+    # ==================== 会话列表 / 迁移 / 复制 ====================
+
+    async def list_sessions(self) -> List[Dict[str, Any]]:
+        """列出所有有数据的会话及其记录数。"""
+        await self.init_db()
+        records = await self.get_all_records()
+        counts: Dict[str, int] = {}
+        for r in records:
+            counts[r.session_id] = counts.get(r.session_id, 0) + 1
+        result = []
+        for sid, cnt in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
+            parts = sid.split(":", 2)
+            result.append({
+                "session_id": sid,
+                "count": cnt,
+                "platform": parts[0] if parts else sid,
+                "session_type": parts[1] if len(parts) >= 2 else "",
+                "session_target": parts[2] if len(parts) >= 3 else "",
+                "is_shared": ":" not in sid,
+            })
+        return result
+
+    async def preview_session(self, session_id: str) -> Dict[str, Any]:
+        """预览某会话下的用户记录摘要。"""
+        await self.init_db()
+        records = await self.get_all_in_session(session_id)
+        users = []
+        for r in records:
+            users.append({
+                "user_id": r.user_id,
+                "username": r.username or r.user_id,
+                "favour": r.favour,
+                "relationship": r.relationship or "",
+                "is_unique": r.is_unique,
+                "last_interaction": r.last_interaction.isoformat() if r.last_interaction else "",
+            })
+        return {"session_id": session_id, "count": len(users), "users": users}
+
+    @_retry_on_locked()
+    async def copy_session(
+        self,
+        source_sid: str,
+        target_sid: str,
+        mode: str = "merge",
+    ) -> Tuple[bool, str, int]:
+        """将源会话数据复制到目标会话（session_id 以外字段全部迁移）。
+
+        mode:
+          - merge: 按 user_id 覆盖写入目标（目标中不存在的用户新增，存在的用源数据覆盖）
+          - replace: 先清空目标会话再完整复制
+        Returns: (success, message, affected_count)
+        """
+        await self.init_db()
+        source_sid = (source_sid or "").strip()
+        target_sid = (target_sid or "").strip()
+        if not source_sid or not target_sid:
+            return False, "源/目标会话 UMO 不能为空", 0
+        if source_sid == target_sid:
+            return False, "源与目标会话不能相同", 0
+
+        try:
+            source_records = await self.get_all_in_session(source_sid)
+            if not source_records:
+                return False, f"源会话无数据: {source_sid}", 0
+
+            async with self.async_session() as session:
+                if mode == "replace":
+                    await session.execute(
+                        delete(FavourRecord).where(FavourRecord.session_id == target_sid)
+                    )
+
+                affected = 0
+                now = datetime.now()
+                for src in source_records:
+                    stmt = select(FavourRecord).where(
+                        FavourRecord.user_id == src.user_id,
+                        FavourRecord.session_id == target_sid,
+                    )
+                    result = await session.execute(stmt)
+                    existing = result.scalars().first()
+                    if existing:
+                        existing.favour = src.favour
+                        existing.relationship = src.relationship or ""
+                        existing.is_unique = src.is_unique
+                        existing.username = src.username or existing.username or ""
+                        existing.updated_at = now
+                        existing.last_interaction = src.last_interaction or existing.last_interaction
+                        session.add(existing)
+                    else:
+                        session.add(FavourRecord(
+                            user_id=src.user_id,
+                            session_id=target_sid,
+                            favour=src.favour,
+                            relationship=src.relationship or "",
+                            is_unique=src.is_unique,
+                            username=src.username or "",
+                            created_at=src.created_at or now,
+                            updated_at=now,
+                            last_interaction=src.last_interaction or now,
+                        ))
+                    affected += 1
+
+                await session.commit()
+
+            msg = f"已将 {affected} 条记录从 {source_sid} 复制到 {target_sid}（模式={mode}）"
+            logger.info(f"[会话复制] {msg}")
+            return True, msg, affected
+        except Exception as e:
+            logger.error(f"复制会话失败: {e}")
+            return False, f"复制失败: {e}", 0
+
+    @_retry_on_locked()
+    async def migrate_session(
+        self,
+        source_sid: str,
+        target_sid: str,
+        mode: str = "merge",
+    ) -> Tuple[bool, str, int]:
+        """迁移会话：复制到目标后清空源会话。"""
+        ok, msg, count = await self.copy_session(source_sid, target_sid, mode=mode)
+        if not ok:
+            return ok, msg, count
+        cleared = await self.clear_session(source_sid)
+        if not cleared:
+            return False, f"复制成功但清空源会话失败: {source_sid}（目标已有 {count} 条）", count
+        full_msg = f"{msg}；已清空源会话 {source_sid}"
+        logger.info(f"[会话迁移] {full_msg}")
+        return True, full_msg, count

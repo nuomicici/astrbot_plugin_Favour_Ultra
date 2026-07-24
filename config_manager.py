@@ -116,6 +116,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "on_query": "冷暴力呢，看什么看，{time_str}之后再找我说话"
         }
     },
+
+    # 会话完全同步：成对 UMO 双向同步好感度/关系/用户字段
+    # 每项: {"a": "platform:type:id", "b": "webchat:FriendMessage:xxx", "enabled": true, "note": ""}
+    "session_sync": {
+        "pairs": [],
+    },
 }
 
 # 配置文件名
