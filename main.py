@@ -2018,9 +2018,9 @@ class FavourManagerTool(Star):
         except Exception as e:
             logger.error(f"注入好感度Prompt失败: {str(e)}\n{traceback.format_exc()}")
 
-    @filter.on_llm_response(priority=10)
+    @filter.on_llm_response(priority=100000)
     async def handle_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
-        """优先读取好感度标签（priority=10 确保在其他钩子之前执行）。"""
+        """优先读取好感度标签（priority=100000 确保在 meme_manager(99999) 等其他钩子之前解析好感度标签）。"""
         if not hasattr(event, 'message_obj'): return
         
         # 搭话合成事件：不记录好感度变更（搭话不应影响好感度）
