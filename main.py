@@ -1,5 +1,6 @@
 # main.py
 import re
+import json
 import traceback
 import shutil
 import hashlib
@@ -17,7 +18,12 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.api.star import Star, register, Context
 from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api.event import filter
-from astrbot.core.agent.message import TextPart
+from astrbot.core.agent.message import (
+    TextPart,
+    Message,
+    bind_checkpoint_messages,
+    is_checkpoint_message,
+)
 from astrbot.core.utils.session_waiter import session_waiter, SessionController
 
 from .utils import is_valid_userid
@@ -623,15 +629,46 @@ class FavourManagerTool(Star):
         except asyncio.CancelledError:
             logger.debug("[自动备份] 调度器已取消")
 
+    async def _get_history_contexts(self, session_id: str, max_turns: int = 20) -> List[Message]:
+        """读取会话当前对话的历史并转为 list[Message]，供 llm_generate 的 contexts 参数。
+
+        仅取最近 max_turns*2 条（user/assistant 各一为1轮），跳过框架内部 checkpoint。
+        历史为空或读取失败时返回空列表，由调用方决定是否注入。
+        """
+        try:
+            conv_mgr = self.context.conversation_manager
+            curr_cid = await conv_mgr.get_curr_conversation_id(session_id)
+            if not curr_cid:
+                return []
+            conversation = await conv_mgr.get_conversation(session_id, curr_cid)
+            if not conversation or not conversation.history:
+                return []
+            history_dicts = json.loads(conversation.history)
+            if not isinstance(history_dicts, list) or not history_dicts:
+                return []
+            # 过滤内部 checkpoint 消息，并用 bind_checkpoint_messages 绑定 checkpoint
+            history_dicts = [m for m in history_dicts if not is_checkpoint_message(m)]
+            # 截取最近若干轮，避免超长
+            if len(history_dicts) > max_turns * 2:
+                history_dicts = history_dicts[-(max_turns * 2):]
+            messages = bind_checkpoint_messages(history_dicts)
+            return messages
+        except Exception as e:
+            logger.warning(f"[搭话上下文] 读取会话 {session_id} 历史失败，将不带上下文搭话: {e}")
+            return []
+
     async def _send_direct_active_chat(self, session_id: str, prompt: str,
                                         record, user_id: str, sys_prompt: str) -> None:
         """非QQ平台直接调LLM生成搭话内容并发送（绕过合成事件管线）。
 
-        适配 AstrBot v4.5.7+ SDK：使用 context.llm_generate。
+        适配 AstrBot v4.5.7+ SDK：使用 context.llm_generate，并注入对话历史上下文。
         兼容旧版 context.llm_manager.get_response（v4.27 已废弃 llm_manager）。
         """
         try:
             completion_text = None
+            # 读取当前对话历史，转为 list[Message] 注入 llm_generate，让搭话更连贯
+            contexts = await self._get_history_contexts(session_id)
+            logger.debug(f"[搭话上下文] 会话 {session_id} 注入 {len(contexts)} 条历史消息作为上下文。")
             # 优先用新版 SDK：llm_generate + get_current_chat_provider_id
             if hasattr(self.context, "llm_generate") and hasattr(self.context, "get_current_chat_provider_id"):
                 try:
@@ -647,6 +684,7 @@ class FavourManagerTool(Star):
                     chat_provider_id=provider_id,
                     prompt=prompt,
                     system_prompt=sys_prompt or "",
+                    contexts=contexts,
                 )
                 completion_text = llm_response.completion_text if llm_response else None
             else:
@@ -657,6 +695,7 @@ class FavourManagerTool(Star):
                     system_prompt=sys_prompt or "",
                     image_urls=None,
                 )
+                # 旧版 llm_manager.get_response 会自动读取会话历史，无需手动注入
                 llm_response = await self.context.llm_manager.get_response(req, session_id)
                 completion_text = llm_response.completion_text if llm_response else None
 
