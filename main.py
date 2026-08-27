@@ -365,8 +365,8 @@ class FavourManagerTool(Star):
         while True:
             try:
                 if _first_round:
-                    # 首次执行缩短等待：启动后 5 分钟先跑一轮，便于用户启用后尽快验证搭话是否生效
-                    await asyncio.sleep(300)
+                    # 首次执行缩短等待：启动后 1 分钟先跑一轮，便于用户启用后尽快验证搭话是否生效
+                    await asyncio.sleep(60)
                     _first_round = False
                 else:
                     interval_seconds = max(1, self.active_chat_interval) * 3600
@@ -388,7 +388,7 @@ class FavourManagerTool(Star):
                 now_minutes = now.hour * 60 + now.minute
                 
                 if now_minutes < start_minutes or now_minutes > end_minutes:
-                    logger.warning(f"[搭话本轮] 跳过 → 当前时间 {now.strftime('%H:%M')} 不在允许时段 {self.active_chat_time_start}-{self.active_chat_time_end}")
+                    logger.debug(f"[搭话调度器] 当前时间 {now.strftime('%H:%M')} 不在允许时段 {self.active_chat_time_start}-{self.active_chat_time_end}，跳过。")
                     continue  # 不在允许的时间范围内
                 
                 # 获取所有有过互动的用户记录
@@ -397,24 +397,18 @@ class FavourManagerTool(Star):
                 all_records.extend(non_global)
                 
                 if not all_records:
-                    logger.warning("[搭话本轮] 跳过 → 无任何用户记录(数据库为空，需先与用户互动产生好感度记录)")
+                    logger.debug("[搭话调度器] 无用户记录，跳过本轮。")
                     continue
                 
-                # 按会话分组（同时统计被白/黑名单过滤的会话，便于排查）
+                # 按会话分组
                 session_groups: Dict[str, List[FavourRecord]] = {}
-                filtered_by_whitelist: List[str] = []
-                filtered_by_blacklist: List[str] = []
                 for record in all_records:
                     sid = record.session_id
                     
                     # 搭话会话级黑白名单过滤（支持精确匹配与尾缀匹配，便于用户填纯QQ号）
                     if self.active_chat_allowed_sessions and not self._session_in_list(sid, self.active_chat_allowed_sessions):
-                        if sid not in filtered_by_whitelist:
-                            filtered_by_whitelist.append(sid)
                         continue
                     if self._session_in_list(sid, self.active_chat_blocked_sessions):
-                        if sid not in filtered_by_blacklist:
-                            filtered_by_blacklist.append(sid)
                         continue
                     
                     # 过滤冷暴力/拉黑用户
@@ -439,15 +433,11 @@ class FavourManagerTool(Star):
                 total_sessions = len(session_groups)
                 total_candidates = sum(len(r) for r in session_groups.values())
                 max_sessions = self.active_chat_max_sessions if self.active_chat_max_sessions > 0 else total_sessions
-                # 本轮启动 warn：候选会话 + 被过滤会话，便于用户确认白名单是否生效
+                # 本轮启动 warn：记录候选会话，便于确认搭话目标
                 logger.warning(
                     f"[搭话本轮] 开始 → 候选会话 {total_sessions} 个 {list(session_groups.keys())} | "
                     f"候选用户 {total_candidates} 人 | 每轮上限 {max_sessions}"
                 )
-                if filtered_by_whitelist:
-                    logger.warning(f"[搭话本轮] 被白名单过滤的会话(未命中白名单): {filtered_by_whitelist}")
-                if filtered_by_blacklist:
-                    logger.warning(f"[搭话本轮] 被黑名单过滤的会话: {filtered_by_blacklist}")
                 
                 # 随机打乱会话顺序，避免固定会话总是优先被搭话
                 session_items = list(session_groups.items())
@@ -492,7 +482,6 @@ class FavourManagerTool(Star):
                                 break
                         
                         if matched_prob is None or matched_prob <= 0:
-                            logger.info(f"[搭话调度器] 用户 {user_id} (会话 {session_id}) 好感度 {record.favour} 未命中任何搭话规则或概率为0，跳过。当前规则数={len(rules_sorted)}")
                             continue
                         
                         # 按概率触发
@@ -513,7 +502,7 @@ class FavourManagerTool(Star):
                                 platform_info = self._platform_cache.get(platform, {})
                                 
                                 if not last_event and not platform_info:
-                                    logger.warning(f"[搭话结果] 跳过 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 原因: 无事件引用且无平台缓存(该会话从未收到过消息或未缓存)")
+                                    logger.debug(f"[搭话调度器] 会话 {session_id} 无事件引用且无平台缓存，跳过。")
                                     continue
                                 #################
                                 
