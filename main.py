@@ -631,25 +631,51 @@ class FavourManagerTool(Star):
 
     async def _send_direct_active_chat(self, session_id: str, prompt: str,
                                         record, user_id: str, sys_prompt: str) -> None:
-        """非QQ平台直接调LLM生成搭话内容并发送（绕过合成事件管线）。"""
-        #################
+        """非QQ平台直接调LLM生成搭话内容并发送（绕过合成事件管线）。
+
+        适配 AstrBot v4.5.7+ SDK：使用 context.llm_generate。
+        兼容旧版 context.llm_manager.get_response（v4.27 已废弃 llm_manager）。
+        """
         try:
-            from astrbot.api.provider import ProviderRequest
-            req = ProviderRequest(
-                prompt=prompt,
-                system_prompt=sys_prompt or "",
-                image_urls=None,
-            )
-            llm_response = await self.context.llm_manager.get_response(req, session_id)
-            if llm_response and llm_response.completion_text:
+            completion_text = None
+            # 优先用新版 SDK：llm_generate + get_current_chat_provider_id
+            if hasattr(self.context, "llm_generate") and hasattr(self.context, "get_current_chat_provider_id"):
+                try:
+                    provider_id = await self.context.get_current_chat_provider_id(umo=session_id)
+                except Exception as pid_err:
+                    logger.warning(f"[搭话直接发送] 获取会话 {session_id} 的 provider_id 失败: {pid_err}，回退 get_using_provider_async")
+                    prov = await self.context.get_using_provider_async(session_id) if hasattr(self.context, "get_using_provider_async") else self.context.get_using_provider(session_id)
+                    provider_id = getattr(prov, "id", None) if prov else None
+                if not provider_id:
+                    logger.warning(f"[搭话调度器] 会话 {session_id} 无可用 LLM provider，跳过直接搭话。")
+                    return
+                llm_response = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=sys_prompt or "",
+                )
+                completion_text = llm_response.completion_text if llm_response else None
+            else:
+                # 兼容旧版（v4.5.7 之前）
+                from astrbot.api.provider import ProviderRequest
+                req = ProviderRequest(
+                    prompt=prompt,
+                    system_prompt=sys_prompt or "",
+                    image_urls=None,
+                )
+                llm_response = await self.context.llm_manager.get_response(req, session_id)
+                completion_text = llm_response.completion_text if llm_response else None
+
+            if completion_text:
                 await self._send_active_chat_message(
-                    session_id, llm_response.completion_text,
+                    session_id, completion_text,
                     user_id, record.favour
                 )
+                logger.warning(f"[搭话结果] 已发送 → 用户 {user_id} | 会话 {session_id} | 路径=直接发送 | 内容 {len(completion_text)} 字")
             else:
                 logger.warning(f"[搭话调度器] LLM 未生成回复 ({user_id})")
         except Exception as e:
-            logger.error(f"直接搭话失败 ({user_id}): {e}")
+            logger.error(f"直接搭话失败 ({user_id}): {e}\n{traceback.format_exc()}")
 
     async def _send_active_chat_message(self, session_id: str, reply_text: str,
                                          user_id: str = "", favour: int = 0) -> None:
