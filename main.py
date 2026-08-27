@@ -799,8 +799,14 @@ class FavourManagerTool(Star):
             conv_mgr = self.context.conversation_manager
             curr_cid = await conv_mgr.get_curr_conversation_id(session_id)
             if not curr_cid:
-                logger.debug(f"[搭话历史] 会话 {session_id} 无当前对话，跳过历史写入。")
-            else:
+                # 该会话尚无当前对话（搭话可能是首次"交互"），创建新对话以保证历史写入
+                try:
+                    curr_cid = await conv_mgr.new_conversation(unified_msg_origin=session_id)
+                    logger.debug(f"[搭话历史] 会话 {session_id} 无当前对话，已创建新对话 {curr_cid}。")
+                except Exception as ce:
+                    logger.warning(f"[搭话历史] 会话 {session_id} 无当前对话且创建失败，跳过历史写入: {ce}")
+                    curr_cid = None
+            if curr_cid:
                 # user 消息：记录系统搭话指令(prompt)，与正常用户消息区分。
                 # 加 [系统主动搭话触发] 前缀便于后续识别，prompt 本身即发给 LLM 的完整搭话指令。
                 user_content = prompt if prompt else f"[系统主动搭话触发] 当前好感度 {favour}"
