@@ -3,7 +3,7 @@
 
 # 好感度/关系管理系统 (Favour Ultra)
 
-[![当前版本](https://img.shields.io/badge/当前版本v4.2.0-blue?style=for-the-badge)](#更新日志) 
+[![当前版本](https://img.shields.io/badge/当前版本v4.4.0-blue?style=for-the-badge)](#更新日志) 
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
@@ -41,6 +41,33 @@
 *   **SQLite 存储**：支持海量用户数据的高效读写、查询与多维度管理（全局/单群隔离模式）。
 *   **WebUI 配置面板**：全功能可视化配置与数据管理面板，支持暗色模式，所有参数零代码修改。
 *   **自动备份系统**：定时自动备份数据库，支持 WebUI 一键创建/恢复/删除/下载备份，保障数据安全。
+*   **主动搭话**：按好感度概率，在允许时段内向用户主动发起对话。搭话内容会写入对话历史并标记为系统触发，与正常用户消息区分。
+
+### ⚠️ 主动搭话平台支持说明
+
+主动搭话依赖平台适配器的「主动消息」能力。以下平台**支持**主动搭话：
+
+| 平台适配器 key | 平台 | 主动搭话 |
+| :--- | :--- | :--- |
+| `aiocqhttp` | OneBot v11（QQ） | ✅ 支持 |
+| `qqofficial` / `qqofficial_webhook` | QQ 官方机器人 | ✅ 支持（受官方客服消息时效限制） |
+| `telegram` | Telegram | ✅ 支持 |
+| `discord` | Discord | ✅ 支持 |
+| `kook` | KOOK | ✅ 支持 |
+| `lark` | 飞书 | ✅ 支持 |
+| `dingtalk` | 钉钉 | ✅ 支持 |
+| `slack` | Slack | ✅ 支持 |
+| `mattermost` | Mattermost | ✅ 支持 |
+| `misskey` | Misskey | ✅ 支持 |
+| `line` | LINE | ✅ 支持 |
+| `satori` | Satori | ✅ 支持 |
+| `wecom_ai_bot` | 企微智能机器人 | ✅ 支持 |
+| `weixin_oc` | 个人微信 | ✅ 支持 |
+| `webchat` | 内置 WebChat | ✅ 支持 |
+| `wecom` | 企微客服 | ⚠️ 仅非客服模式且配置了 agent_id 时支持 |
+| `weixin_official_account` | 微信公众号 | ❌ 不支持，搭话功能不可用 |
+
+> **注意**：若你使用的平台在上表中为 ❌ 或 ⚠️，主动搭话将无法送达，请在白名单中避免填入该平台的会话，否则搭话触发后只会写入对话历史而无法实际发送。
 
 ---
 

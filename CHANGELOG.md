@@ -17,6 +17,15 @@
 https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/tree/older/
 
 ## 更新日志
+### v4.4.1 (2026-08-27)
+- **主动搭话适配所有支持主动消息的平台**（此前仅 aiocqhttp 走合成事件管线，其余平台路径单一）：
+  - 新增 `_platform_supports_proactive` 判断，参考框架内置工具 `send_message_to_user`，统一由 `context.send_message` 平台无关路由
+  - 明确不支持主动消息的平台（微信公众号、企微客服模式）触发时跳过实际发送并记录 warn，避免框架 raise
+  - 搭话触发日志新增平台信息，便于跨平台排查
+- **主动搭话内容写入对话历史**（conversation history），用 `[系统主动搭话触发]` 标记的 user 消息 + assistant 搭话原文成对写入，与正常用户消息区分
+- **README 新增主动搭话平台支持说明**，列出全部平台的主动消息支持情况
+- 调度器首轮等待缩短为启动后 1 分钟；跳过类日志降为 debug，仅保留触发/结果 warn
+- 直接发送路径适配 v4.5.7+ SDK（`llm_generate` + `get_current_chat_provider_id`），修复 `llm_manager` 已废弃导致发送失败
 ### v4.4.0 (2026-08-27)
 - **修复主动搭话在私聊场景下从未触发的问题**，主要原因与修复如下：
   1. 默认搭话规则最低只覆盖好感度 50，导致好感度不足 50 的用户无规则匹配、概率恒为 0 → 现已新增 0~49 区间兜底规则（概率 1%），并对老配置自动补全缺失的低好感度区间

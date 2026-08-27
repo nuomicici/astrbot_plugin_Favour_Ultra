@@ -576,15 +576,20 @@ class FavourManagerTool(Star):
                                 synth_event.set_extra("_is_active_chat_synthetic", True)
                                 synth_event.set_extra("_active_chat_target_uid", user_id)
                                 
+                                # 检查平台是否支持主动消息；不支持的平台跳过实际发送，避免框架 raise 异常
+                                # 参考框架内置工具 send_message_to_user：统一走 send_message，由平台适配器路由
+                                if not self._platform_supports_proactive(session_id):
+                                    logger.warning(f"[搭话结果] 跳过 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 平台 {platform} 不支持主动消息，已跳过发送")
+                                    continue
                                 # aiocqhttp 平台走事件队列（完整管线：persona + 分段）;
-                                # 非 aiocqhttp 平台（微信等）直接调 LLM + 发送，避免合成事件不被适配器识别
+                                # 其他支持主动消息的平台直接调 LLM + 发送（send_message 平台无关路由）
                                 #################
                                 if platform.startswith("aiocqhttp"):
                                     self.context.get_event_queue().put_nowait(synth_event)
-                                    logger.warning(f"[搭话结果] 触发 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 好感度 {record.favour} | 路径=合成事件管线")
+                                    logger.warning(f"[搭话结果] 触发 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 好感度 {record.favour} | 平台 {platform} | 路径=合成事件管线")
                                 else:
                                     # 直接调 LLM 生成搭话内容并分段发送
-                                    logger.warning(f"[搭话结果] 触发 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 好感度 {record.favour} | 路径=直接发送")
+                                    logger.warning(f"[搭话结果] 触发 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 好感度 {record.favour} | 平台 {platform} | 路径=直接发送")
                                     await self._send_direct_active_chat(session_id, prompt, record, user_id, sys_prompt)
                                 #################
                             except Exception as send_err:
@@ -1519,6 +1524,26 @@ class FavourManagerTool(Star):
             if sid.endswith(":" + entry) or sid == entry:
                 return True
         return False
+
+    # 不支持主动消息的平台前缀（基于 AstrBot 适配器 send_by_session 实现）
+    # 微信公众号 send_by_session 直接 raise；企微客服模式不支持主动发送
+    _NO_PROACTIVE_PLATFORMS = ("weixin_official_account",)
+    _PARTIAL_PROACTIVE_PLATFORMS = ("wecom",)  # 企微：仅非客服模式+agent_id 时支持
+
+    def _platform_supports_proactive(self, session_id: str) -> bool:
+        """判断该会话所在平台是否支持主动消息发送（搭话）。
+
+        基于框架各适配器 send_by_session 的实现：
+        - weixin_official_account: 直接 raise，不支持
+        - wecom: 客服模式 raise，非客服模式需 agent_id（保守判为部分支持，运行时再失败）
+        其余平台均支持。
+        """
+        platform = (session_id.split(":")[0] if ":" in session_id else session_id).strip().lower()
+        if not platform:
+            return False
+        if platform in self._NO_PROACTIVE_PLATFORMS:
+            return False
+        return True
 
     def _escape_markdown(self, text: str) -> str:
         """转义 Markdown 特殊字符以防止表格错位或渲染错误"""
