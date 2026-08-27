@@ -663,7 +663,8 @@ class FavourManagerTool(Star):
             if completion_text:
                 await self._send_active_chat_message(
                     session_id, completion_text,
-                    user_id, record.favour
+                    user_id, record.favour,
+                    prompt=prompt,
                 )
                 logger.warning(f"[搭话结果] 已发送 → 用户 {user_id} | 会话 {session_id} | 路径=直接发送 | 内容 {len(completion_text)} 字")
             else:
@@ -672,7 +673,8 @@ class FavourManagerTool(Star):
             logger.error(f"直接搭话失败 ({user_id}): {e}\n{traceback.format_exc()}")
 
     async def _send_active_chat_message(self, session_id: str, reply_text: str,
-                                         user_id: str = "", favour: int = 0) -> None:
+                                         user_id: str = "", favour: int = 0,
+                                         prompt: str = "") -> None:
         """分段发送主动搭话消息。
         
         将 LLM 生成的回复文本按自然句边界分割，逐段发送并加入延迟，
@@ -799,10 +801,14 @@ class FavourManagerTool(Star):
             if not curr_cid:
                 logger.debug(f"[搭话历史] 会话 {session_id} 无当前对话，跳过历史写入。")
             else:
-                # user 消息：标记为系统主动搭话触发，与正常用户消息区分
+                # user 消息：记录系统搭话指令(prompt)，与正常用户消息区分。
+                # 加 [系统主动搭话触发] 前缀便于后续识别，prompt 本身即发给 LLM 的完整搭话指令。
+                user_content = prompt if prompt else f"[系统主动搭话触发] 当前好感度 {favour}"
+                if not user_content.startswith("[系统主动搭话触发]"):
+                    user_content = f"[系统主动搭话触发] {user_content}"
                 user_msg = {
                     "role": "user",
-                    "content": [{"type": "text", "text": f"[系统主动搭话触发] 当前好感度 {favour}"}],
+                    "content": [{"type": "text", "text": user_content}],
                 }
                 # assistant 消息：搭话原文 + [好感度 持平] 标签，保持与正常对话历史格式一致。
                 # 标签仅写入上下文，不发送给用户（reply_text 发送时已不含标签）。
