@@ -804,10 +804,15 @@ class FavourManagerTool(Star):
                     "role": "user",
                     "content": [{"type": "text", "text": f"[系统主动搭话触发] 当前好感度 {favour}"}],
                 }
-                # assistant 消息：Bot 的搭话内容（含好感度标签则原样保留）
+                # assistant 消息：搭话原文 + [好感度 持平] 标签，保持与正常对话历史格式一致。
+                # 标签仅写入上下文，不发送给用户（reply_text 发送时已不含标签）。
+                # 主动搭话不改变好感度，故使用"持平"标签。
+                history_text = reply_text.rstrip()
+                if not self.favour_pattern.search(history_text):
+                    history_text = f"{history_text}[好感度 持平]"
                 assistant_msg = {
                     "role": "assistant",
-                    "content": [{"type": "text", "text": reply_text}],
+                    "content": [{"type": "text", "text": history_text}],
                 }
                 await conv_mgr.add_message_pair(
                     cid=curr_cid,
