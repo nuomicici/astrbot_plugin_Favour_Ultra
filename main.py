@@ -785,23 +785,33 @@ class FavourManagerTool(Star):
         
         logger.debug(f"[搭话分段] 发送完成，共 {len(final_segments)} 段。")
         
-        # 将搭话消息记录进平台消息历史（确保后续 LLM 对话能引用它）
+        # 将搭话写入对话历史（conversation history，LLM 上下文）
+        # 区分用户发送与系统发送：主动搭话是系统触发，用一条 user 消息表示"系统搭话指令"，
+        # 一条 assistant 消息记录 Bot 的搭话内容，便于后续 LLM 对话引用。
         try:
-            parts = session_id.split(":", 2)
-            platform_id = parts[0] if len(parts) >= 1 else session_id
-            target_id = parts[2] if len(parts) >= 3 else session_id
-            # 取回复文本的缩写作为内容摘要
-            summary = reply_text[:200] if len(reply_text) > 200 else reply_text
-            await self.context.message_history_manager.insert(
-                platform_id=platform_id,
-                user_id=target_id,
-                content={"text": summary},
-                sender_id="astrbot",   # 标记为 Bot 发送
-                sender_name="Bot",
-            )
-            logger.debug(f"[搭话分段] 已记录到平台消息历史 ({platform_id}/{target_id})。")
+            conv_mgr = self.context.conversation_manager
+            curr_cid = await conv_mgr.get_curr_conversation_id(session_id)
+            if not curr_cid:
+                logger.debug(f"[搭话历史] 会话 {session_id} 无当前对话，跳过历史写入。")
+            else:
+                # user 消息：标记为系统主动搭话触发，与正常用户消息区分
+                user_msg = {
+                    "role": "user",
+                    "content": [{"type": "text", "text": f"[系统主动搭话触发] 当前好感度 {favour}"}],
+                }
+                # assistant 消息：Bot 的搭话内容（含好感度标签则原样保留）
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": reply_text}],
+                }
+                await conv_mgr.add_message_pair(
+                    cid=curr_cid,
+                    user_message=user_msg,
+                    assistant_message=assistant_msg,
+                )
+                logger.debug(f"[搭话历史] 已写入对话历史 ({session_id}, cid={curr_cid})。")
         except Exception as hist_err:
-            logger.debug(f"[搭话分段] 写入消息历史失败（非致命）: {hist_err}")
+            logger.warning(f"[搭话历史] 写入对话历史失败 ({session_id}): {hist_err}")
 
     # ==================== Pages API ====================
 
