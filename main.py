@@ -353,10 +353,16 @@ class FavourManagerTool(Star):
         - 发送时进行分段处理（模拟被动回复的消息管线）。
         """
         import random as _random
+        _first_round = True
         while True:
             try:
-                interval_seconds = max(1, self.active_chat_interval) * 3600
-                await asyncio.sleep(interval_seconds)
+                if _first_round:
+                    # 首次执行缩短等待：启动后 5 分钟先跑一轮，便于用户启用后尽快验证搭话是否生效
+                    await asyncio.sleep(300)
+                    _first_round = False
+                else:
+                    interval_seconds = max(1, self.active_chat_interval) * 3600
+                    await asyncio.sleep(interval_seconds)
                 if not self.active_chat_enabled:
                     continue
                 
@@ -391,10 +397,10 @@ class FavourManagerTool(Star):
                 for record in all_records:
                     sid = record.session_id
                     
-                    # 搭话会话级黑白名单过滤
-                    if self.active_chat_allowed_sessions and sid not in self.active_chat_allowed_sessions:
+                    # 搭话会话级黑白名单过滤（支持精确匹配与尾缀匹配，便于用户填纯QQ号）
+                    if self.active_chat_allowed_sessions and not self._session_in_list(sid, self.active_chat_allowed_sessions):
                         continue
-                    if sid in self.active_chat_blocked_sessions:
+                    if self._session_in_list(sid, self.active_chat_blocked_sessions):
                         continue
                     
                     # 过滤冷暴力/拉黑用户
@@ -464,6 +470,7 @@ class FavourManagerTool(Star):
                                 break
                         
                         if matched_prob is None or matched_prob <= 0:
+                            logger.info(f"[搭话调度器] 用户 {user_id} (会话 {session_id}) 好感度 {record.favour} 未命中任何搭话规则或概率为0，跳过。当前规则数={len(rules_sorted)}")
                             continue
                         
                         # 按概率触发
@@ -1428,6 +1435,41 @@ class FavourManagerTool(Star):
         共享会话的 session_id 不包含 ':'，而独立会话格式为 'platform:type:target'。"""
         return ":" not in (session_id or "")
 
+    @staticmethod
+    def _session_in_list(session_id: str, allowlist: list) -> bool:
+        """会话ID与白/黑名单匹配。支持精确匹配与尾缀匹配。
+
+        精确匹配：完整 UMO 一致，如 'aiocqhttp:FriendMessage:1090007836'。
+        尾缀匹配：用户只填了纯会话目标（如 QQ 号 '1090007836'），
+                  或平台前缀 'aiocqhttp'，此时按 UMO 各段尾缀比对。
+        """
+        if not allowlist:
+            return False
+        if not session_id:
+            return False
+        sid = str(session_id)
+        for item in allowlist:
+            if not item:
+                continue
+            entry = str(item).strip()
+            if not entry:
+                continue
+            # 1. 精确匹配
+            if sid == entry:
+                return True
+            # 2. 尾缀匹配：entry 是 sid 的最后一段，或 sid 以 entry 结尾
+            #    例：sid='aiocqhttp:FriendMessage:1090007836'，entry='1090007836' 命中
+            sid_parts = sid.split(":")
+            if entry in sid_parts:
+                return True
+            # 3. 前缀匹配：共享会话(如 'aiocqhttp') 与独立会话(以该前缀开头)互通
+            if sid.startswith(entry + ":") or entry.startswith(sid + ":"):
+                return True
+            # 4. 字符串尾缀兜底（避免带平台前缀的格式差异）
+            if sid.endswith(":" + entry) or sid == entry:
+                return True
+        return False
+
     def _escape_markdown(self, text: str) -> str:
         """转义 Markdown 特殊字符以防止表格错位或渲染错误"""
         if not text:
@@ -1735,24 +1777,46 @@ class FavourManagerTool(Star):
 
     # ================= 事件处理 =================
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=-1)
+    async def _cache_event_for_active_chat(self, event: AstrMessageEvent) -> None:
+        """尽早缓存事件引用与平台信息，供主动搭话合成事件使用。
+
+        放在 event_message_type 钩子（比 on_llm_request 更早），
+        确保即便消息未触发 LLM（被指令/其他插件拦截），也能缓存事件，
+        主动搭话时才能拿到可用的合成事件模板。
+        """
+        try:
+            session_id = self._get_session_id(event)
+            if not session_id:
+                return
+            # 非共享会话：按完整 UMO 缓存事件
+            if not self._is_shared_session(session_id):
+                self._last_events[session_id] = event
+            # 平台级缓存（对全局/非全局模式都生效）：兜底同平台其他会话的搭话
+            platform = session_id.split(":")[0] if ":" in session_id else session_id
+            if platform not in self._platform_cache and hasattr(event, 'platform_meta'):
+                self._platform_cache[platform] = {
+                    "platform_meta": event.platform_meta,
+                    "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
+                }
+        except Exception:
+            pass
+
     @filter.on_llm_request()
     async def inject_favour_prompt(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         try:
             session_id = self._get_session_id(event)
             user_id = str(event.get_sender_id())
 
-            # 存储事件引用，供主动搭话合成事件使用
-            if session_id and not self._is_shared_session(session_id):
+            # 兜底：若 event_message_type 钩子未缓存（如早期版本启动顺序问题），这里再补一次
+            if session_id and not self._is_shared_session(session_id) and session_id not in self._last_events:
                 self._last_events[session_id] = event
-                # 同时缓存平台级信息，兜底该平台其他无事件会话的搭话
-                #################
                 platform = session_id.split(":")[0] if ":" in session_id else session_id
                 if platform not in self._platform_cache and hasattr(event, 'platform_meta'):
                     self._platform_cache[platform] = {
                         "platform_meta": event.platform_meta,
                         "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
                     }
-            #################
             # 搭话合成事件：使用目标用户的好感度数据
             is_synthetic = event.get_extra("_is_active_chat_synthetic")
             target_uid = event.get_extra("_active_chat_target_uid")
@@ -1761,10 +1825,10 @@ class FavourManagerTool(Star):
                 logger.debug(f"[搭话管线] 合成事件注入目标用户 {user_id} 的好感度/关系数据。")
 
             if not self._is_shared_session(session_id):
-                if self.allowed_sessions and session_id not in self.allowed_sessions:
+                if self.allowed_sessions and not self._session_in_list(session_id, self.allowed_sessions):
                     logger.debug(f"[Prompt注入] 会话 {session_id} 不在白名单中，跳过。")
                     return
-                if session_id in self.blocked_sessions:
+                if self._session_in_list(session_id, self.blocked_sessions):
                     logger.debug(f"[Prompt注入] 会话 {session_id} 在黑名单中，跳过。")
                     return
 

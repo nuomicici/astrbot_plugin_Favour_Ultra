@@ -69,9 +69,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "allowed_sessions": [],    # 白名单：为空=全部允许；非空=仅允许列出的会话
         # 按好感度区间分配触发概率（百分比），按 min_favour 从高到低匹配
         "rules": [
-            {"min_favour": 90, "max_favour": 100, "probability": 15},
+            {"min_favour": 90, "max_favour": 1000, "probability": 15},
             {"min_favour": 70, "max_favour": 89,  "probability": 8},
             {"min_favour": 50, "max_favour": 69,  "probability": 3},
+            {"min_favour": 0,  "max_favour": 49,  "probability": 1},
         ],
         # LLM 搭话提示词。可用占位符：{current_time}=当前时间, {last_interaction_ago}=距上次互动时长, {favour}=好感度, {relationship}=关系, {user_name}=用户ID
         "llm_prompt": (
@@ -259,6 +260,17 @@ class PluginConfigManager:
                     ac["rules"],
                     DEFAULT_CONFIG["active_chat"]["rules"]
                 )
+                # 配置升级：确保搭话规则覆盖低好感度区间（含 0）。
+                # 旧版默认规则最低只覆盖 50 好感度，导致好感度不足 50 的用户永远无法被搭话。
+                # 若用户现有规则未覆盖到 0，则补一条低好感度兜底规则。
+                rules = ac["rules"] if isinstance(ac["rules"], list) else []
+                if rules and all(isinstance(r, dict) for r in rules):
+                    covered_min = min((r.get("min_favour", 0) for r in rules), default=999)
+                    if covered_min > 0:
+                        ac["rules"] = rules + [
+                            {"min_favour": 0, "max_favour": covered_min - 1, "probability": 1}
+                        ]
+                        logger.info(f"[配置升级] 主动搭话规则未覆盖 0~{covered_min-1} 好感度区间，已自动补充兜底规则(概率1%)。")
         
         return config
 
