@@ -5,6 +5,7 @@
 安装时若检测到旧版框架配置则迁移，否则按默认配置生成。
 """
 import json
+import os
 import copy
 import shutil
 import traceback
@@ -175,11 +176,42 @@ class PluginConfigManager:
                 result[key] = value
         return result
 
+    def _restore_from_backup(self) -> bool:
+        """尝试从 backups 目录恢复最近的 config 备份。
+
+        扫描 plugin_data/backups 下 config_*.json，按修改时间取最新一份加载并写回 config.json。
+        Returns: True 表示已成功恢复。
+        """
+        try:
+            backups_dir = self.plugin_data_dir / "backups"
+            if not backups_dir.exists():
+                return False
+            config_backups = sorted(
+                [p for p in backups_dir.iterdir()
+                 if p.is_file() and p.name.startswith("config_") and p.suffix == ".json"],
+                key=lambda p: p.stat().st_mtime,
+            )
+            if not config_backups:
+                return False
+            latest = config_backups[-1]
+            with open(latest, "r", encoding="utf-8-sig") as bf:
+                loaded = json.load(bf)
+            loaded = self._normalize_config_after_load(loaded)
+            self._config = self._deep_merge(copy.deepcopy(DEFAULT_CONFIG), loaded)
+            self._save()
+            logger.warning(f"已从备份恢复配置: {latest}")
+            return True
+        except Exception as rerr:
+            logger.error(f"从备份恢复配置失败: {rerr}")
+            return False
+
     def load_or_create(self) -> Dict[str, Any]:
         """
         加载配置。若配置文件不存在：
           1. 检测旧版本框架配置（data/config/...）→ 有则迁移（仅迁移，之后不再读取）
           2. 无则按默认配置生成
+        若配置文件存在但损坏：备份损坏文件 → 尝试从 backups 恢复 → 否则默认配置。
+        若配置文件不存在但有 backups：优先从 backups 恢复，避免重装/误删导致配置丢失。
         """
         if self._config:
             return self._config
@@ -198,10 +230,23 @@ class PluginConfigManager:
                 logger.info(f"已加载插件配置: {self.config_path}")
                 return self._config
             except Exception as e:
-                logger.error(f"加载配置文件失败: {e}，将使用默认配置。")
-                self._config = copy.deepcopy(DEFAULT_CONFIG)
-                self._save()
+                # 配置文件损坏（如上次写入被中断导致 JSON 不完整）。
+                # 恢复顺序：1) 备份损坏文件 → 2) 尝试从 backups/ 下最近的 config 备份恢复 → 3) 找不到备份才用默认配置
+                logger.error(f"加载配置文件失败: {e}，尝试从备份恢复。")
+                try:
+                    backup_path = self.config_path.with_suffix(".json.corrupt_backup")
+                    shutil.copy2(self.config_path, backup_path)
+                    logger.warning(f"损坏的配置文件已备份至: {backup_path}，可手动检查恢复。")
+                except Exception as be:
+                    logger.error(f"备份损坏配置文件失败: {be}")
+                if not self._restore_from_backup():
+                    self._config = copy.deepcopy(DEFAULT_CONFIG)
+                    self._save()
                 return self._config
+
+        # 配置文件不存在 → 优先从 backups 恢复（避免重装/误删 plugin_data 导致配置丢失）
+        if self._restore_from_backup():
+            return self._config
 
         # 配置文件不存在 → 尝试迁移旧版框架配置（仅首次安装时）
         if self.old_config_path and self.old_config_path.exists():
@@ -345,11 +390,18 @@ class PluginConfigManager:
         return new_config
 
     def _save(self) -> None:
-        """保存配置到文件（仅保存到 plugin_data 目录）。"""
+        """保存配置到文件（仅保存到 plugin_data 目录）。
+
+        采用「写临时文件 + 原子 rename」：先写入同目录临时文件，写入成功后再替换正式文件，
+        避免写入过程中进程被杀/重启导致配置文件被截断成非法 JSON，进而触发加载失败→配置清空。
+        """
         try:
             self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as f:
+            tmp_path = self.config_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, ensure_ascii=False, indent=2)
+            # os.replace 是原子操作（同文件系统内），不会留下半写文件
+            os.replace(tmp_path, self.config_path)
         except Exception as e:
             logger.error(f"保存配置文件失败: {e}")
 
