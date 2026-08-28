@@ -3,17 +3,17 @@
 
 # 好感度/关系管理系统 (Favour Ultra)
 
-[![当前版本](https://img.shields.io/badge/当前版本v4.4.0-blue?style=for-the-badge)](#更新日志) 
+[![当前版本](https://img.shields.io/badge/当前版本v4.4.2-blue?style=for-the-badge)](#更新日志) 
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
 <div align="left" style="width:70%">
 
-最新动态 (2026-07-09)
+最新动态 (2026-08-28)
 
 
-* **核心机制重大升级**：新增数据库自动备份系统，支持定时备份与一键恢复；WebUI 主题全面重构，支持暗色模式；SQLite 并发写入大幅增强。
-* **配置更新**：更新后旧有好感度规则失效，请务必前往webui进行配置检查和更新！
+* **主动搭话更连贯**：非 QQ 平台直接发送搭话时现已注入对话历史上下文，搭话内容不再脱离前后文。
+* **搭话标签处理优化**：发送前自动去除好感度标签，用户只看到干净文本；历史记录按 LLM 是否输出标签决定是否补标，避免模型因上下文学习漏输出标签。
 * **必看！**：如果后台显示“无法识别好感度标签”，请先尝试在预设对话中添加如下内容并清空历史对话记录！（若无效请前往反馈）
 ```
 - 你好！
