@@ -1,5 +1,6 @@
 # main.py
 import re
+import json
 import traceback
 import shutil
 import hashlib
@@ -17,7 +18,12 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.api.star import Star, register, Context
 from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api.event import filter
-from astrbot.core.agent.message import TextPart
+from astrbot.core.agent.message import (
+    TextPart,
+    Message,
+    bind_checkpoint_messages,
+    is_checkpoint_message,
+)
 from astrbot.core.utils.session_waiter import session_waiter, SessionController
 
 from .utils import is_valid_userid
@@ -353,10 +359,24 @@ class FavourManagerTool(Star):
         - 发送时进行分段处理（模拟被动回复的消息管线）。
         """
         import random as _random
+        # 调度器启动：记录配置概要，便于确认主动搭话是否真正运行
+        logger.warning(
+            f"[搭话调度器] 已启动 | 间隔 {self.active_chat_interval}h | "
+            f"时段 {self.active_chat_time_start}-{self.active_chat_time_end} | "
+            f"每轮上限 {self.active_chat_max_sessions} | 规则数 {len(self.active_chat_rules)} | "
+            f"白名单 {self.active_chat_allowed_sessions or '空(全部允许)'} | "
+            f"已缓存会话事件 {len(self._last_events)} 个 | 平台缓存 {list(self._platform_cache.keys())}"
+        )
+        _first_round = True
         while True:
             try:
-                interval_seconds = max(1, self.active_chat_interval) * 3600
-                await asyncio.sleep(interval_seconds)
+                if _first_round:
+                    # 首次执行缩短等待：启动后 1 分钟先跑一轮，便于用户启用后尽快验证搭话是否生效
+                    await asyncio.sleep(60)
+                    _first_round = False
+                else:
+                    interval_seconds = max(1, self.active_chat_interval) * 3600
+                    await asyncio.sleep(interval_seconds)
                 if not self.active_chat_enabled:
                     continue
                 
@@ -391,10 +411,10 @@ class FavourManagerTool(Star):
                 for record in all_records:
                     sid = record.session_id
                     
-                    # 搭话会话级黑白名单过滤
-                    if self.active_chat_allowed_sessions and sid not in self.active_chat_allowed_sessions:
+                    # 搭话会话级黑白名单过滤（支持精确匹配与尾缀匹配，便于用户填纯QQ号）
+                    if self.active_chat_allowed_sessions and not self._session_in_list(sid, self.active_chat_allowed_sessions):
                         continue
-                    if sid in self.active_chat_blocked_sessions:
+                    if self._session_in_list(sid, self.active_chat_blocked_sessions):
                         continue
                     
                     # 过滤冷暴力/拉黑用户
@@ -419,7 +439,11 @@ class FavourManagerTool(Star):
                 total_sessions = len(session_groups)
                 total_candidates = sum(len(r) for r in session_groups.values())
                 max_sessions = self.active_chat_max_sessions if self.active_chat_max_sessions > 0 else total_sessions
-                logger.debug(f"[搭话调度器] 共 {total_sessions} 个会话，{total_candidates} 个候选用户，每轮上限 {max_sessions} 个会话，开始逐会话检查。")
+                # 本轮启动 warn：记录候选会话，便于确认搭话目标
+                logger.warning(
+                    f"[搭话本轮] 开始 → 候选会话 {total_sessions} 个 {list(session_groups.keys())} | "
+                    f"候选用户 {total_candidates} 人 | 每轮上限 {max_sessions}"
+                )
                 
                 # 随机打乱会话顺序，避免固定会话总是优先被搭话
                 session_items = list(session_groups.items())
@@ -558,21 +582,29 @@ class FavourManagerTool(Star):
                                 synth_event.set_extra("_is_active_chat_synthetic", True)
                                 synth_event.set_extra("_active_chat_target_uid", user_id)
                                 
+                                # 检查平台是否支持主动消息；不支持的平台跳过实际发送，避免框架 raise 异常
+                                # 参考框架内置工具 send_message_to_user：统一走 send_message，由平台适配器路由
+                                if not self._platform_supports_proactive(session_id):
+                                    logger.warning(f"[搭话结果] 跳过 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 平台 {platform} 不支持主动消息，已跳过发送")
+                                    continue
                                 # aiocqhttp 平台走事件队列（完整管线：persona + 分段）;
-                                # 非 aiocqhttp 平台（微信等）直接调 LLM + 发送，避免合成事件不被适配器识别
+                                # 其他支持主动消息的平台直接调 LLM + 发送（send_message 平台无关路由）
                                 #################
                                 if platform.startswith("aiocqhttp"):
                                     self.context.get_event_queue().put_nowait(synth_event)
-                                    logger.info(f"[搭话调度器] 合成事件已推入管线 → 目标 {user_id} (会话 {session_id})，概率 {matched_prob}%")
+                                    logger.warning(f"[搭话结果] 触发 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 好感度 {record.favour} | 平台 {platform} | 路径=合成事件管线")
                                 else:
                                     # 直接调 LLM 生成搭话内容并分段发送
-                                    logger.info(f"[搭话调度器] 非QQ平台直接发送 → 目标 {user_id} (会话 {session_id})，概率 {matched_prob}%")
+                                    logger.warning(f"[搭话结果] 触发 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 好感度 {record.favour} | 平台 {platform} | 路径=直接发送")
                                     await self._send_direct_active_chat(session_id, prompt, record, user_id, sys_prompt)
                                 #################
                             except Exception as send_err:
-                                logger.warning(f"主动搭话失败 ({user_id}): {send_err}")
+                                logger.warning(f"[搭话结果] 失败 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 错误: {send_err}")
                 
-                logger.debug(f"[搭话调度器] 本轮完成：{triggered_sessions}/{total_sessions} 个会话触发了搭话。")
+                logger.warning(
+                    f"[搭话本轮] 完成 → 触发 {triggered_sessions}/{total_sessions} 个会话 | "
+                    f"候选 {total_candidates} 人 | 本轮触发的会话见上方[搭话结果]日志"
+                )
                 
             except asyncio.CancelledError:
                 break
@@ -597,30 +629,91 @@ class FavourManagerTool(Star):
         except asyncio.CancelledError:
             logger.debug("[自动备份] 调度器已取消")
 
+    async def _get_history_contexts(self, session_id: str, max_turns: int = 20) -> List[Message]:
+        """读取会话当前对话的历史并转为 list[Message]，供 llm_generate 的 contexts 参数。
+
+        仅取最近 max_turns*2 条（user/assistant 各一为1轮），跳过框架内部 checkpoint。
+        历史为空或读取失败时返回空列表，由调用方决定是否注入。
+        """
+        try:
+            conv_mgr = self.context.conversation_manager
+            curr_cid = await conv_mgr.get_curr_conversation_id(session_id)
+            if not curr_cid:
+                return []
+            conversation = await conv_mgr.get_conversation(session_id, curr_cid)
+            if not conversation or not conversation.history:
+                return []
+            history_dicts = json.loads(conversation.history)
+            if not isinstance(history_dicts, list) or not history_dicts:
+                return []
+            # 过滤内部 checkpoint 消息，并用 bind_checkpoint_messages 绑定 checkpoint
+            history_dicts = [m for m in history_dicts if not is_checkpoint_message(m)]
+            # 截取最近若干轮，避免超长
+            if len(history_dicts) > max_turns * 2:
+                history_dicts = history_dicts[-(max_turns * 2):]
+            messages = bind_checkpoint_messages(history_dicts)
+            return messages
+        except Exception as e:
+            logger.warning(f"[搭话上下文] 读取会话 {session_id} 历史失败，将不带上下文搭话: {e}")
+            return []
+
     async def _send_direct_active_chat(self, session_id: str, prompt: str,
                                         record, user_id: str, sys_prompt: str) -> None:
-        """非QQ平台直接调LLM生成搭话内容并发送（绕过合成事件管线）。"""
-        #################
+        """非QQ平台直接调LLM生成搭话内容并发送（绕过合成事件管线）。
+
+        适配 AstrBot v4.5.7+ SDK：使用 context.llm_generate，并注入对话历史上下文。
+        兼容旧版 context.llm_manager.get_response（v4.27 已废弃 llm_manager）。
+        """
         try:
-            from astrbot.api.provider import ProviderRequest
-            req = ProviderRequest(
-                prompt=prompt,
-                system_prompt=sys_prompt or "",
-                image_urls=None,
-            )
-            llm_response = await self.context.llm_manager.get_response(req, session_id)
-            if llm_response and llm_response.completion_text:
-                await self._send_active_chat_message(
-                    session_id, llm_response.completion_text,
-                    user_id, record.favour
+            completion_text = None
+            # 读取当前对话历史，转为 list[Message] 注入 llm_generate，让搭话更连贯
+            contexts = await self._get_history_contexts(session_id)
+            logger.debug(f"[搭话上下文] 会话 {session_id} 注入 {len(contexts)} 条历史消息作为上下文。")
+            # 优先用新版 SDK：llm_generate + get_current_chat_provider_id
+            if hasattr(self.context, "llm_generate") and hasattr(self.context, "get_current_chat_provider_id"):
+                try:
+                    provider_id = await self.context.get_current_chat_provider_id(umo=session_id)
+                except Exception as pid_err:
+                    logger.warning(f"[搭话直接发送] 获取会话 {session_id} 的 provider_id 失败: {pid_err}，回退 get_using_provider_async")
+                    prov = await self.context.get_using_provider_async(session_id) if hasattr(self.context, "get_using_provider_async") else self.context.get_using_provider(session_id)
+                    provider_id = getattr(prov, "id", None) if prov else None
+                if not provider_id:
+                    logger.warning(f"[搭话调度器] 会话 {session_id} 无可用 LLM provider，跳过直接搭话。")
+                    return
+                llm_response = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=sys_prompt or "",
+                    contexts=contexts,
                 )
+                completion_text = llm_response.completion_text if llm_response else None
+            else:
+                # 兼容旧版（v4.5.7 之前）
+                from astrbot.api.provider import ProviderRequest
+                req = ProviderRequest(
+                    prompt=prompt,
+                    system_prompt=sys_prompt or "",
+                    image_urls=None,
+                )
+                # 旧版 llm_manager.get_response 会自动读取会话历史，无需手动注入
+                llm_response = await self.context.llm_manager.get_response(req, session_id)
+                completion_text = llm_response.completion_text if llm_response else None
+
+            if completion_text:
+                await self._send_active_chat_message(
+                    session_id, completion_text,
+                    user_id, record.favour,
+                    prompt=prompt,
+                )
+                logger.warning(f"[搭话结果] 已发送 → 用户 {user_id} | 会话 {session_id} | 路径=直接发送 | 内容 {len(completion_text)} 字")
             else:
                 logger.warning(f"[搭话调度器] LLM 未生成回复 ({user_id})")
         except Exception as e:
-            logger.error(f"直接搭话失败 ({user_id}): {e}")
+            logger.error(f"直接搭话失败 ({user_id}): {e}\n{traceback.format_exc()}")
 
     async def _send_active_chat_message(self, session_id: str, reply_text: str,
-                                         user_id: str = "", favour: int = 0) -> None:
+                                         user_id: str = "", favour: int = 0,
+                                         prompt: str = "") -> None:
         """分段发送主动搭话消息。
         
         将 LLM 生成的回复文本按自然句边界分割，逐段发送并加入延迟，
@@ -636,6 +729,16 @@ class FavourManagerTool(Star):
             return
         
         logger.debug(f"[搭话分段] 准备向会话 {session_id} 发送搭话，原文 {len(reply_text)} 字。")
+        
+        # 发送给用户前去除好感度标签，避免用户看到控制标签。
+        # 同时据此判断 LLM 是否已输出标签：含标签则历史保留原文（模型已学会格式，不补），不含则补[好感度 持平]。
+        raw_reply_text = reply_text
+        had_favour_tag = bool(self.favour_pattern.search(raw_reply_text))
+        send_text = self.favour_pattern.sub("", raw_reply_text).rstrip()
+        if not send_text:
+            logger.warning(f"[搭话分段] 会话 {session_id} 去除好感度标签后内容为空，跳过发送。")
+            return
+        reply_text = send_text
         
         # 第一步：按句末标点 + 换行做硬分割
         hard_pattern = re.compile(r'([。！？!?\n]+)')
@@ -738,23 +841,51 @@ class FavourManagerTool(Star):
         
         logger.debug(f"[搭话分段] 发送完成，共 {len(final_segments)} 段。")
         
-        # 将搭话消息记录进平台消息历史（确保后续 LLM 对话能引用它）
+        # 将搭话写入对话历史（conversation history，LLM 上下文）
+        # 区分用户发送与系统发送：主动搭话是系统触发，用一条 user 消息表示"系统搭话指令"，
+        # 一条 assistant 消息记录 Bot 的搭话内容，便于后续 LLM 对话引用。
         try:
-            parts = session_id.split(":", 2)
-            platform_id = parts[0] if len(parts) >= 1 else session_id
-            target_id = parts[2] if len(parts) >= 3 else session_id
-            # 取回复文本的缩写作为内容摘要
-            summary = reply_text[:200] if len(reply_text) > 200 else reply_text
-            await self.context.message_history_manager.insert(
-                platform_id=platform_id,
-                user_id=target_id,
-                content={"text": summary},
-                sender_id="astrbot",   # 标记为 Bot 发送
-                sender_name="Bot",
-            )
-            logger.debug(f"[搭话分段] 已记录到平台消息历史 ({platform_id}/{target_id})。")
+            conv_mgr = self.context.conversation_manager
+            curr_cid = await conv_mgr.get_curr_conversation_id(session_id)
+            if not curr_cid:
+                # 该会话尚无当前对话（搭话可能是首次"交互"），创建新对话以保证历史写入
+                try:
+                    curr_cid = await conv_mgr.new_conversation(unified_msg_origin=session_id)
+                    logger.debug(f"[搭话历史] 会话 {session_id} 无当前对话，已创建新对话 {curr_cid}。")
+                except Exception as ce:
+                    logger.warning(f"[搭话历史] 会话 {session_id} 无当前对话且创建失败，跳过历史写入: {ce}")
+                    curr_cid = None
+            if curr_cid:
+                # user 消息：记录系统搭话指令(prompt)，与正常用户消息区分。
+                # 加 [系统主动搭话触发] 前缀便于后续识别，prompt 本身即发给 LLM 的完整搭话指令。
+                user_content = prompt if prompt else f"[系统主动搭话触发] 当前好感度 {favour}"
+                if not user_content.startswith("[系统主动搭话触发]"):
+                    user_content = f"[系统主动搭话触发] {user_content}"
+                user_msg = {
+                    "role": "user",
+                    "content": [{"type": "text", "text": user_content}],
+                }
+                # assistant 消息历史文本策略：
+                # - LLM 输出已含好感度标签（had_favour_tag=True）：保留原始含标签文本，模型已学会格式，不再补
+                # - LLM 输出不含标签（had_favour_tag=False）：补 [好感度 持平]，保持历史格式一致并提示模型格式
+                # 标签仅写入上下文，不发送给用户（发送用 reply_text 已去除标签）。
+                # 主动搭话不改变好感度，故使用"持平"标签。
+                if had_favour_tag:
+                    history_text = raw_reply_text.rstrip()
+                else:
+                    history_text = f"{reply_text.rstrip()}[好感度 持平]"
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": history_text}],
+                }
+                await conv_mgr.add_message_pair(
+                    cid=curr_cid,
+                    user_message=user_msg,
+                    assistant_message=assistant_msg,
+                )
+                logger.debug(f"[搭话历史] 已写入对话历史 ({session_id}, cid={curr_cid})。")
         except Exception as hist_err:
-            logger.debug(f"[搭话分段] 写入消息历史失败（非致命）: {hist_err}")
+            logger.warning(f"[搭话历史] 写入对话历史失败 ({session_id}): {hist_err}")
 
     # ==================== Pages API ====================
 
@@ -1428,6 +1559,61 @@ class FavourManagerTool(Star):
         共享会话的 session_id 不包含 ':'，而独立会话格式为 'platform:type:target'。"""
         return ":" not in (session_id or "")
 
+    @staticmethod
+    def _session_in_list(session_id: str, allowlist: list) -> bool:
+        """会话ID与白/黑名单匹配。支持精确匹配与尾缀匹配。
+
+        精确匹配：完整 UMO 一致，如 'aiocqhttp:FriendMessage:1090007836'。
+        尾缀匹配：用户只填了纯会话目标（如 QQ 号 '1090007836'），
+                  或平台前缀 'aiocqhttp'，此时按 UMO 各段尾缀比对。
+        """
+        if not allowlist:
+            return False
+        if not session_id:
+            return False
+        sid = str(session_id)
+        for item in allowlist:
+            if not item:
+                continue
+            entry = str(item).strip()
+            if not entry:
+                continue
+            # 1. 精确匹配
+            if sid == entry:
+                return True
+            # 2. 尾缀匹配：entry 是 sid 的最后一段，或 sid 以 entry 结尾
+            #    例：sid='aiocqhttp:FriendMessage:1090007836'，entry='1090007836' 命中
+            sid_parts = sid.split(":")
+            if entry in sid_parts:
+                return True
+            # 3. 前缀匹配：共享会话(如 'aiocqhttp') 与独立会话(以该前缀开头)互通
+            if sid.startswith(entry + ":") or entry.startswith(sid + ":"):
+                return True
+            # 4. 字符串尾缀兜底（避免带平台前缀的格式差异）
+            if sid.endswith(":" + entry) or sid == entry:
+                return True
+        return False
+
+    # 不支持主动消息的平台前缀（基于 AstrBot 适配器 send_by_session 实现）
+    # 微信公众号 send_by_session 直接 raise；企微客服模式不支持主动发送
+    _NO_PROACTIVE_PLATFORMS = ("weixin_official_account",)
+    _PARTIAL_PROACTIVE_PLATFORMS = ("wecom",)  # 企微：仅非客服模式+agent_id 时支持
+
+    def _platform_supports_proactive(self, session_id: str) -> bool:
+        """判断该会话所在平台是否支持主动消息发送（搭话）。
+
+        基于框架各适配器 send_by_session 的实现：
+        - weixin_official_account: 直接 raise，不支持
+        - wecom: 客服模式 raise，非客服模式需 agent_id（保守判为部分支持，运行时再失败）
+        其余平台均支持。
+        """
+        platform = (session_id.split(":")[0] if ":" in session_id else session_id).strip().lower()
+        if not platform:
+            return False
+        if platform in self._NO_PROACTIVE_PLATFORMS:
+            return False
+        return True
+
     def _escape_markdown(self, text: str) -> str:
         """转义 Markdown 特殊字符以防止表格错位或渲染错误"""
         if not text:
@@ -1735,24 +1921,46 @@ class FavourManagerTool(Star):
 
     # ================= 事件处理 =================
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=-1)
+    async def _cache_event_for_active_chat(self, event: AstrMessageEvent) -> None:
+        """尽早缓存事件引用与平台信息，供主动搭话合成事件使用。
+
+        放在 event_message_type 钩子（比 on_llm_request 更早），
+        确保即便消息未触发 LLM（被指令/其他插件拦截），也能缓存事件，
+        主动搭话时才能拿到可用的合成事件模板。
+        """
+        try:
+            session_id = self._get_session_id(event)
+            if not session_id:
+                return
+            # 非共享会话：按完整 UMO 缓存事件
+            if not self._is_shared_session(session_id):
+                self._last_events[session_id] = event
+            # 平台级缓存（对全局/非全局模式都生效）：兜底同平台其他会话的搭话
+            platform = session_id.split(":")[0] if ":" in session_id else session_id
+            if platform not in self._platform_cache and hasattr(event, 'platform_meta'):
+                self._platform_cache[platform] = {
+                    "platform_meta": event.platform_meta,
+                    "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
+                }
+        except Exception:
+            pass
+
     @filter.on_llm_request()
     async def inject_favour_prompt(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         try:
             session_id = self._get_session_id(event)
             user_id = str(event.get_sender_id())
 
-            # 存储事件引用，供主动搭话合成事件使用
-            if session_id and not self._is_shared_session(session_id):
+            # 兜底：若 event_message_type 钩子未缓存（如早期版本启动顺序问题），这里再补一次
+            if session_id and not self._is_shared_session(session_id) and session_id not in self._last_events:
                 self._last_events[session_id] = event
-                # 同时缓存平台级信息，兜底该平台其他无事件会话的搭话
-                #################
                 platform = session_id.split(":")[0] if ":" in session_id else session_id
                 if platform not in self._platform_cache and hasattr(event, 'platform_meta'):
                     self._platform_cache[platform] = {
                         "platform_meta": event.platform_meta,
                         "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
                     }
-            #################
             # 搭话合成事件：使用目标用户的好感度数据
             is_synthetic = event.get_extra("_is_active_chat_synthetic")
             target_uid = event.get_extra("_active_chat_target_uid")
@@ -1761,10 +1969,10 @@ class FavourManagerTool(Star):
                 logger.debug(f"[搭话管线] 合成事件注入目标用户 {user_id} 的好感度/关系数据。")
 
             if not self._is_shared_session(session_id):
-                if self.allowed_sessions and session_id not in self.allowed_sessions:
+                if self.allowed_sessions and not self._session_in_list(session_id, self.allowed_sessions):
                     logger.debug(f"[Prompt注入] 会话 {session_id} 不在白名单中，跳过。")
                     return
-                if session_id in self.blocked_sessions:
+                if self._session_in_list(session_id, self.blocked_sessions):
                     logger.debug(f"[Prompt注入] 会话 {session_id} 在黑名单中，跳过。")
                     return
 
