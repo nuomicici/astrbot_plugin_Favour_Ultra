@@ -730,6 +730,16 @@ class FavourManagerTool(Star):
         
         logger.debug(f"[搭话分段] 准备向会话 {session_id} 发送搭话，原文 {len(reply_text)} 字。")
         
+        # 发送给用户前去除好感度标签，避免用户看到控制标签。
+        # 同时据此判断 LLM 是否已输出标签：含标签则历史保留原文（模型已学会格式，不补），不含则补[好感度 持平]。
+        raw_reply_text = reply_text
+        had_favour_tag = bool(self.favour_pattern.search(raw_reply_text))
+        send_text = self.favour_pattern.sub("", raw_reply_text).rstrip()
+        if not send_text:
+            logger.warning(f"[搭话分段] 会话 {session_id} 去除好感度标签后内容为空，跳过发送。")
+            return
+        reply_text = send_text
+        
         # 第一步：按句末标点 + 换行做硬分割
         hard_pattern = re.compile(r'([。！？!?\n]+)')
         
@@ -855,12 +865,15 @@ class FavourManagerTool(Star):
                     "role": "user",
                     "content": [{"type": "text", "text": user_content}],
                 }
-                # assistant 消息：搭话原文 + [好感度 持平] 标签，保持与正常对话历史格式一致。
-                # 标签仅写入上下文，不发送给用户（reply_text 发送时已不含标签）。
+                # assistant 消息历史文本策略：
+                # - LLM 输出已含好感度标签（had_favour_tag=True）：保留原始含标签文本，模型已学会格式，不再补
+                # - LLM 输出不含标签（had_favour_tag=False）：补 [好感度 持平]，保持历史格式一致并提示模型格式
+                # 标签仅写入上下文，不发送给用户（发送用 reply_text 已去除标签）。
                 # 主动搭话不改变好感度，故使用"持平"标签。
-                history_text = reply_text.rstrip()
-                if not self.favour_pattern.search(history_text):
-                    history_text = f"{history_text}[好感度 持平]"
+                if had_favour_tag:
+                    history_text = raw_reply_text.rstrip()
+                else:
+                    history_text = f"{reply_text.rstrip()}[好感度 持平]"
                 assistant_msg = {
                     "role": "assistant",
                     "content": [{"type": "text", "text": history_text}],
