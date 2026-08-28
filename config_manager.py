@@ -5,6 +5,7 @@
 安装时若检测到旧版框架配置则迁移，否则按默认配置生成。
 """
 import json
+import os
 import copy
 import shutil
 import traceback
@@ -198,7 +199,15 @@ class PluginConfigManager:
                 logger.info(f"已加载插件配置: {self.config_path}")
                 return self._config
             except Exception as e:
-                logger.error(f"加载配置文件失败: {e}，将使用默认配置。")
+                # 配置文件损坏（如上次写入被中断导致 JSON 不完整）。
+                # 先将损坏文件备份为 .corrupt_backup，再用默认配置恢复，避免直接覆盖导致用户配置永久丢失。
+                logger.error(f"加载配置文件失败: {e}，将损坏文件备份后使用默认配置恢复。")
+                try:
+                    backup_path = self.config_path.with_suffix(".json.corrupt_backup")
+                    shutil.copy2(self.config_path, backup_path)
+                    logger.warning(f"损坏的配置文件已备份至: {backup_path}，可手动检查恢复。")
+                except Exception as be:
+                    logger.error(f"备份损坏配置文件失败: {be}")
                 self._config = copy.deepcopy(DEFAULT_CONFIG)
                 self._save()
                 return self._config
@@ -345,11 +354,18 @@ class PluginConfigManager:
         return new_config
 
     def _save(self) -> None:
-        """保存配置到文件（仅保存到 plugin_data 目录）。"""
+        """保存配置到文件（仅保存到 plugin_data 目录）。
+
+        采用「写临时文件 + 原子 rename」：先写入同目录临时文件，写入成功后再替换正式文件，
+        避免写入过程中进程被杀/重启导致配置文件被截断成非法 JSON，进而触发加载失败→配置清空。
+        """
         try:
             self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as f:
+            tmp_path = self.config_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, ensure_ascii=False, indent=2)
+            # os.replace 是原子操作（同文件系统内），不会留下半写文件
+            os.replace(tmp_path, self.config_path)
         except Exception as e:
             logger.error(f"保存配置文件失败: {e}")
 
