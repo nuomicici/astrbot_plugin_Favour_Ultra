@@ -53,6 +53,8 @@ function status(t, c) {
 
 // ===== Tab 切换 =====
 $$('#tabs .tab').forEach(b => b.onclick = () => {
+  // 切换前先 collect 当前 tab，把输入框（含未失焦的）回写 config，避免切换后丢失
+  collect();
   $$('#tabs .tab').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
   show(b.dataset.t);
@@ -97,18 +99,20 @@ function bindAll() {
   $$('[data-act]').forEach(el => {
     el.onclick = () => {
       const act = el.dataset.act;
-      if (act === 'add-level')  { addLevel(); show('levels'); }
-      else if (act === 'del-level') { delLevel(+el.dataset.idx); show('levels'); }
-      else if (act === 'add-adv')   { addAdv(); show('decay'); }
-      else if (act === 'del-adv')   { delAdv(+el.dataset.idx); show('decay'); }
-      else if (act === 'add-act')   { addAct(); show('active'); }
-      else if (act === 'del-act')   { delAct(+el.dataset.idx); show('active'); }
-      else if (act === 'add-list')  { addList(el.dataset.path); show(currentTab()); }
-      else if (act === 'del-list')  { delList(el.dataset.path, +el.dataset.idx); show(currentTab()); }
+      // 添加/删除动态项前先 collect，把当前 DOM 输入框（含未失焦的）回写 config，
+      // 避免重渲染时丢失已填入但未触发 onchange 的数据。
+      if (act === 'add-level')  { collect(); addLevel(); show('levels'); }
+      else if (act === 'del-level') { collect(); delLevel(+el.dataset.idx); show('levels'); }
+      else if (act === 'add-adv')   { collect(); addAdv(); show('decay'); }
+      else if (act === 'del-adv')   { collect(); delAdv(+el.dataset.idx); show('decay'); }
+      else if (act === 'add-act')   { collect(); addAct(); show('active'); }
+      else if (act === 'del-act')   { collect(); delAct(+el.dataset.idx); show('active'); }
+      else if (act === 'add-list')  { collect(); addList(el.dataset.path); show(currentTab()); }
+      else if (act === 'del-list')  { collect(); delList(el.dataset.path, +el.dataset.idx); show(currentTab()); }
     };
   });
   const ds = $('favour_decay-mode-sel');
-  if (ds) ds.onchange = () => { s('favour_decay.mode', ds.value); show('decay'); };
+  if (ds) ds.onchange = () => { collect(); s('favour_decay.mode', ds.value); show('decay'); };
 }
 
 function currentTab() { const t = document.querySelector('#tabs .tab.on'); return t ? t.dataset.t : 'basic'; }

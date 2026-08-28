@@ -176,11 +176,42 @@ class PluginConfigManager:
                 result[key] = value
         return result
 
+    def _restore_from_backup(self) -> bool:
+        """尝试从 backups 目录恢复最近的 config 备份。
+
+        扫描 plugin_data/backups 下 config_*.json，按修改时间取最新一份加载并写回 config.json。
+        Returns: True 表示已成功恢复。
+        """
+        try:
+            backups_dir = self.plugin_data_dir / "backups"
+            if not backups_dir.exists():
+                return False
+            config_backups = sorted(
+                [p for p in backups_dir.iterdir()
+                 if p.is_file() and p.name.startswith("config_") and p.suffix == ".json"],
+                key=lambda p: p.stat().st_mtime,
+            )
+            if not config_backups:
+                return False
+            latest = config_backups[-1]
+            with open(latest, "r", encoding="utf-8-sig") as bf:
+                loaded = json.load(bf)
+            loaded = self._normalize_config_after_load(loaded)
+            self._config = self._deep_merge(copy.deepcopy(DEFAULT_CONFIG), loaded)
+            self._save()
+            logger.warning(f"已从备份恢复配置: {latest}")
+            return True
+        except Exception as rerr:
+            logger.error(f"从备份恢复配置失败: {rerr}")
+            return False
+
     def load_or_create(self) -> Dict[str, Any]:
         """
         加载配置。若配置文件不存在：
           1. 检测旧版本框架配置（data/config/...）→ 有则迁移（仅迁移，之后不再读取）
           2. 无则按默认配置生成
+        若配置文件存在但损坏：备份损坏文件 → 尝试从 backups 恢复 → 否则默认配置。
+        若配置文件不存在但有 backups：优先从 backups 恢复，避免重装/误删导致配置丢失。
         """
         if self._config:
             return self._config
@@ -200,17 +231,22 @@ class PluginConfigManager:
                 return self._config
             except Exception as e:
                 # 配置文件损坏（如上次写入被中断导致 JSON 不完整）。
-                # 先将损坏文件备份为 .corrupt_backup，再用默认配置恢复，避免直接覆盖导致用户配置永久丢失。
-                logger.error(f"加载配置文件失败: {e}，将损坏文件备份后使用默认配置恢复。")
+                # 恢复顺序：1) 备份损坏文件 → 2) 尝试从 backups/ 下最近的 config 备份恢复 → 3) 找不到备份才用默认配置
+                logger.error(f"加载配置文件失败: {e}，尝试从备份恢复。")
                 try:
                     backup_path = self.config_path.with_suffix(".json.corrupt_backup")
                     shutil.copy2(self.config_path, backup_path)
                     logger.warning(f"损坏的配置文件已备份至: {backup_path}，可手动检查恢复。")
                 except Exception as be:
                     logger.error(f"备份损坏配置文件失败: {be}")
-                self._config = copy.deepcopy(DEFAULT_CONFIG)
-                self._save()
+                if not self._restore_from_backup():
+                    self._config = copy.deepcopy(DEFAULT_CONFIG)
+                    self._save()
                 return self._config
+
+        # 配置文件不存在 → 优先从 backups 恢复（避免重装/误删 plugin_data 导致配置丢失）
+        if self._restore_from_backup():
+            return self._config
 
         # 配置文件不存在 → 尝试迁移旧版框架配置（仅首次安装时）
         if self.old_config_path and self.old_config_path.exists():

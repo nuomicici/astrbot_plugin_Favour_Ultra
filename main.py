@@ -613,7 +613,11 @@ class FavourManagerTool(Star):
                 await asyncio.sleep(600)
 
     async def _backup_scheduler(self):
-        """周期性自动备份调度器"""
+        """周期性自动备份调度器
+
+        同时备份：数据库记录（由 db_manager 处理）与插件配置文件 config.json。
+        配置备份确保重装/误删 plugin_data 后仍可恢复 WebUI 设置，避免用户配置丢失。
+        """
         try:
             await asyncio.sleep(10)  # 启动延迟，等待数据库初始化
             while True:
@@ -621,6 +625,8 @@ class FavourManagerTool(Star):
                     path = await self.db_manager.auto_backup()
                     if path:
                         logger.info(f"[自动备份] 已创建备份: {path}")
+                    # 顺带备份配置文件，与数据库备份同周期同目录
+                    await self._backup_config()
                     # 清理过期备份
                     await self.db_manager.cleanup_old_backups(self.backup_retention_hours)
                 except Exception as e:
@@ -628,6 +634,26 @@ class FavourManagerTool(Star):
                 await asyncio.sleep(self.backup_interval_hours * 3600)
         except asyncio.CancelledError:
             logger.debug("[自动备份] 调度器已取消")
+
+    async def _backup_config(self) -> None:
+        """将当前配置文件备份到 backups 目录（带时间戳）。
+
+        配置备份文件名以 config_ 前缀，便于与数据库备份区分；
+        随数据库备份一同被 cleanup_old_backups 按留存时长清理。
+        """
+        try:
+            import shutil as _shutil
+            config_path = self.config_mgr.config_path
+            if not config_path.exists():
+                return
+            backup_dir = self.db_manager.data_dir / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dest = backup_dir / f"config_{timestamp}.json"
+            _shutil.copy2(config_path, dest)
+            logger.debug(f"[自动备份] 配置已备份: {dest}")
+        except Exception as e:
+            logger.warning(f"[自动备份] 配置备份失败: {e}")
 
     async def _get_history_contexts(self, session_id: str, max_turns: int = 20) -> List[Message]:
         """读取会话当前对话的历史并转为 list[Message]，供 llm_generate 的 contexts 参数。
