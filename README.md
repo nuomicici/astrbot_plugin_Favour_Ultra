@@ -3,15 +3,16 @@
 
 # 好感度/关系管理系统 (Favour Ultra)
 
-[![当前版本](https://img.shields.io/badge/当前版本v4.4.3-blue?style=for-the-badge)](#更新日志) 
+[![当前版本](https://img.shields.io/badge/当前版本v4.4.4-blue?style=for-the-badge)](#更新日志) 
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
 <div align="left" style="width:70%">
 
-最新动态 (2026-08-28)
+最新动态 (2026-08-30)
 
 
+* **优化注入 prompt，节省 token 和加强输出标签限制**：轻量化重构提示词，利用近因强化杜绝长对话漏标，提升 RP 人设专注度。
 * **配置不再清空**：修复插件更新/重启后配置可能被默认配置覆盖的问题（原子写入 + 损坏自动恢复）。
 * **搭话修复**：直接发送路径注入对话历史上下文；发送前去除好感度标签；历史标签策略避免模型漏输出。
 * **WebUI 修复**：添加/删除分级、规则、列表项时不再丢失未保存的输入。
