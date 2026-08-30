@@ -1,803 +1,1665 @@
+/**
+ * 好感度 Ultra · WebUI 控制中心
+ * 深度重构与美术升级 (全局定制下拉选单美化)
+ */
+
 const bridge = window.AstrBotPluginPage;
-let config = {}, original = {};
+let config = {};
+let originalConfig = {};
+let isDirtyState = false;
 
-// ===== 通知弹窗系统 =====
-// 成功：半透明上升消失的 toast
-// 失败：固定弹窗需手动关闭
-function toast(msg, type) {
-  const el = document.createElement('div');
-  el.className = 'toast toast-' + type;
-  el.textContent = msg;
+// ==================== 自定义弹窗 Modal 系统 ====================
 
-  if (type === 'err') {
-    // 失败：固定弹窗，点击关闭
-    const closeBtn = document.createElement('span');
-    closeBtn.className = 'toast-close';
-    closeBtn.textContent = '\u00D7';
-    closeBtn.onclick = () => el.remove();
-    el.appendChild(closeBtn);
-    document.body.appendChild(el);
-  } else {
-    // 成功/信息：匀速上升 + 变透明后消失
-    document.body.appendChild(el);
-    setTimeout(() => el.classList.add('toast-fade'), 50);
-    setTimeout(() => el.remove(), 2200);
+let _modalResolve = null;
+
+function showConfirmModal({ title = '操作确认', desc = '确定要执行此操作吗？', iconColor = 'rose' } = {}) {
+  return new Promise((resolve) => {
+    _modalResolve = resolve;
+    const backdrop = document.getElementById('modal-backdrop');
+    const titleEl = document.getElementById('modal-title');
+    const descEl = document.getElementById('modal-desc');
+    const iconWrap = document.getElementById('modal-icon');
+
+    if (titleEl) titleEl.textContent = title;
+    if (descEl) descEl.textContent = desc;
+
+    if (iconWrap) {
+      iconWrap.style.background = iconColor === 'amber' ? 'var(--accent-amber-bg)' : 'var(--accent-rose-bg)';
+      iconWrap.style.color = iconColor === 'amber' ? 'var(--accent-amber)' : 'var(--accent-rose)';
+    }
+
+    if (backdrop) backdrop.classList.remove('hidden');
+  });
+}
+
+function closeModal(result) {
+  const backdrop = document.getElementById('modal-backdrop');
+  if (backdrop) backdrop.classList.add('hidden');
+  if (_modalResolve) {
+    _modalResolve(result);
+    _modalResolve = null;
   }
 }
 
-// ===== 初始化 =====
+// ==================== Toast 提示系统 ====================
+
+function toast(message, type = 'ok', duration = 3000) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+
+  const item = document.createElement('div');
+  item.className = `toast-item ${type}`;
+
+  const textSpan = document.createElement('span');
+  textSpan.textContent = message;
+  item.appendChild(textSpan);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'toast-close';
+  closeBtn.innerHTML = '&times;';
+  closeBtn.onclick = () => {
+    item.classList.add('toast-leave');
+    setTimeout(() => item.remove(), 200);
+  };
+  item.appendChild(closeBtn);
+
+  container.appendChild(item);
+
+  setTimeout(() => {
+    if (item.parentElement) {
+      item.classList.add('toast-leave');
+      setTimeout(() => item.remove(), 200);
+    }
+  }, duration);
+}
+
+// ==================== 状态指示 ====================
+
+function setStatus(text, type = 'ok') {
+  const label = document.getElementById('status');
+  const dot = document.getElementById('status-dot');
+  if (label) label.textContent = text;
+  if (dot) {
+    dot.className = `status-dot ${type}`;
+  }
+}
+
+function markDirty(dirty = true) {
+  isDirtyState = dirty;
+  const indicator = document.getElementById('dirty-indicator');
+  if (indicator) {
+    if (dirty) indicator.classList.remove('hidden');
+    else indicator.classList.add('hidden');
+  }
+}
+
+// ==================== 初始化与数据加载 ====================
+
 async function init() {
   try {
-    status('加载中...', 'loading');
+    setStatus('正在连接...', 'loading');
     config = await bridge.apiGet('config');
-    original = deepClone(config);
-    show('basic');
-    status('已连接', 'ok');
-  } catch(e) {
-    status('加载失败: ' + e.message, 'err');
+    originalConfig = deepClone(config);
+
+    // 动态读取并展示插件真实版本号
+    const verTag = document.getElementById('brand-version-tag');
+    if (verTag) {
+      const ver = config._plugin_version || (bridge.context && bridge.context.version) || 'v4.4.4';
+      verTag.textContent = ver.startsWith('v') ? ver : 'v' + ver;
+    }
+
+    markDirty(false);
+    setStatus('已就绪', 'ok');
+    renderTab('basic');
+  } catch (err) {
+    console.error('初始化配置失败:', err);
+    setStatus('加载失败', 'err');
+    toast('加载配置失败: ' + err.message, 'err');
   }
 }
 
-// ===== 主题监听 =====
-// bridge SDK 会在主题切换时推送 context，其中 isDark 字段指示当前主题
-// SDK 已自动设置 data-theme 属性，此处监听以便做额外处理（如日志）
-bridge.onContext && bridge.onContext(ctx => {
-  // data-theme 已由 SDK 自动设置，无需手动操作
-});
+// ==================== 选项卡切换 ====================
 
-// ===== 状态徽章 =====
-function status(t, c) {
-  const e = $('status');
-  if (e) { e.textContent = t; e.className = 'badge ' + c; }
-}
-
-// ===== Tab 切换 =====
-$$('#tabs .tab').forEach(b => b.onclick = () => {
-  // 切换前先 collect 当前 tab，把输入框（含未失焦的）回写 config，避免切换后丢失
-  collect();
-  $$('#tabs .tab').forEach(x => x.classList.remove('on'));
-  b.classList.add('on');
-  show(b.dataset.t);
-});
-$('btn-save').onclick = () => save();
-
-// ===== 渲染入口 =====
-function show(t) {
-  const r = { basic, levels, decay, active, perm, adv, cold, data, migrate, backup };
-  const bodyEl = document.getElementById('body');
-  if (!bodyEl) return;
-  bodyEl.innerHTML = (r[t] || (() => '')).call(this);
-  bindAll();
-  if (t === 'data') {
-    initDataTab();
-  }
-  if (t === 'migrate') {
-    initMigrateTab();
-  }
-  if (t === 'backup') {
-    initBackupTab();
-  }
-}
-
-// ===== 工具函数 =====
-function $(id) { return document.getElementById(id); }
-function $$(sel) { return Array.from(document.querySelectorAll(sel)); }
-function g(p, d) { const k = p.split('.'); let v = config; for (const kk of k) { if (v == null || typeof v !== 'object') return d; v = v[kk]; } return v !== undefined ? v : d; }
-function s(p, v) { const k = p.split('.'); let o = config; for (let i = 0; i < k.length - 1; i++) { if (!(k[i] in o)) o[k[i]] = {}; o = o[k[i]]; } o[k[k.length - 1]] = v; }
-function deepClone(x) { return JSON.parse(JSON.stringify(x)); }
-function esc(x) { return x ? String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') : ''; }
-
-// ===== 绑定事件 =====
-function bindAll() {
-  $$('#body input, #body select, #body textarea').forEach(el => {
-    el.onchange = el.oninput = () => dirty();
-  });
-  // 提示图标：点击常驻弹出说明
-  $$('.tip-icon').forEach(el => {
-    el.onclick = (e) => { e.stopPropagation(); el.classList.toggle('show'); };
-  });
-  $$('[data-act]').forEach(el => {
-    el.onclick = () => {
-      const act = el.dataset.act;
-      // 添加/删除动态项前先 collect，把当前 DOM 输入框（含未失焦的）回写 config，
-      // 避免重渲染时丢失已填入但未触发 onchange 的数据。
-      if (act === 'add-level')  { collect(); addLevel(); show('levels'); }
-      else if (act === 'del-level') { collect(); delLevel(+el.dataset.idx); show('levels'); }
-      else if (act === 'add-adv')   { collect(); addAdv(); show('decay'); }
-      else if (act === 'del-adv')   { collect(); delAdv(+el.dataset.idx); show('decay'); }
-      else if (act === 'add-act')   { collect(); addAct(); show('active'); }
-      else if (act === 'del-act')   { collect(); delAct(+el.dataset.idx); show('active'); }
-      else if (act === 'add-list')  { collect(); addList(el.dataset.path); show(currentTab()); }
-      else if (act === 'del-list')  { collect(); delList(el.dataset.path, +el.dataset.idx); show(currentTab()); }
+function setupNavTabs() {
+  const tabs = document.querySelectorAll('#tabs .nav-tab');
+  tabs.forEach((tab) => {
+    tab.onclick = () => {
+      collectFormData();
+      tabs.forEach((t) => t.classList.remove('on'));
+      tab.classList.add('on');
+      renderTab(tab.dataset.t);
     };
   });
-  const ds = $('favour_decay-mode-sel');
-  if (ds) ds.onchange = () => { collect(); s('favour_decay.mode', ds.value); show('decay'); };
+
+  const saveBtn = document.getElementById('btn-save');
+  if (saveBtn) saveBtn.onclick = () => saveConfig();
+
+  const cancelModalBtn = document.getElementById('modal-btn-cancel');
+  const confirmModalBtn = document.getElementById('modal-btn-confirm');
+  if (cancelModalBtn) cancelModalBtn.onclick = () => closeModal(false);
+  if (confirmModalBtn) confirmModalBtn.onclick = () => closeModal(true);
+
+  // 全局点击监听：点击外部自动收起所有下拉菜单
+  document.addEventListener('click', (e) => {
+    const isInsideSelect = e.target.closest('[data-custom-select]');
+    document.querySelectorAll('[data-custom-select].open').forEach((sel) => {
+      if (sel !== isInsideSelect) {
+        sel.classList.remove('open');
+      }
+    });
+  });
+
+  // ESC 键收起弹窗与下拉菜单
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      document.querySelectorAll('[data-custom-select].open').forEach((sel) => {
+        sel.classList.remove('open');
+      });
+      const backdrop = document.getElementById('modal-backdrop');
+      if (backdrop && !backdrop.classList.contains('hidden')) {
+        closeModal(false);
+      }
+    }
+  });
 }
 
-function currentTab() { const t = document.querySelector('#tabs .tab.on'); return t ? t.dataset.t : 'basic'; }
-function dirty() { status('配置已修改', 'warn'); }
-
-// ===== 数据操作 =====
-function addLevel() { const l = g('favour_levels', []); const last = l.length > 0 ? l[l.length - 1] : { max: -101 }; l.push({ min: last.max + 1, max: last.max + 50, name: '等级' + (l.length + 1), desc: '' }); }
-function delLevel(i) { g('favour_levels', []).splice(i, 1); }
-function addAdv() { g('favour_decay.advanced_rules', []).push({ min_favour: 0, max_favour: 100, inactive_days: 7, decay_amount: 5, floor: null }); }
-function delAdv(i) { g('favour_decay.advanced_rules', []).splice(i, 1); }
-function addAct() { g('active_chat.rules', []).push({ min_favour: 0, max_favour: 100, probability: 5 }); }
-function delAct(i) { g('active_chat.rules', []).splice(i, 1); }
-function addList(p) { g(p, []).push(''); }
-function delList(p, i) { g(p, []).splice(i, 1); }
-
-// ===== UI 组件 =====
-function chk(p, l, h) {
-  return `<label class="fg"><span class="lb">${l}</span><input type="checkbox" data-p="${p}" ${g(p, false) ? 'checked' : ''}><span class="sw"></span>${h ? `<em>${h}</em>` : ''}</label>`;
-}
-function sel(p, l, o) {
-  return `<label class="fg"><span class="lb">${l}</span><select data-p="${p}" id="${p.replace(/\./g, '-')}-sel">${o.map(([a, b]) => `<option value="${a}" ${g(p, '') === a ? 'selected' : ''}>${b}</option>`).join('')}</select></label>`;
-}
-function num(p, l) { return `<label class="fg"><span class="lb">${l}</span><input type="number" data-p="${p}" value="${g(p, 0)}"></label>`; }
-function num2(p, l, h) { const v = g(p, ''); return `<label class="fg"><span class="lb">${l}</span><input type="number" data-p="${p}" value="${v != null && v !== undefined ? v : ''}" placeholder="${h || ''}">${h ? `<em>${h}</em>` : ''}</label>`; }
-function txt(p, l, r, h) { return `<label class="fg fg-full"><span class="lb">${l}</span><textarea data-p="${p}" rows="${r || 4}">${esc(g(p, ''))}</textarea>${h ? `<em>${h}</em>` : ''}</label>`; }
-function txt2(p, l, h) { return `<label class="fg"><span class="lb">${l}</span><input type="text" data-p="${p}" value="${esc(g(p, ''))}">${h ? `<em>${h}</em>` : ''}</label>`; }
-function row(...items) { return `<div class="row">${items.join('')}</div>`; }
-function card(title, body) { return `<div class="card"><div class="card-t">${title}</div>${body}</div>`; }
-function sec(title) { return `<div class="sec">${title}</div>`; }
-function lrHeader(cols, widths) {
-  return `<div class="lr lr-h">${cols.map((c, i) => `<span${widths && widths[i] ? ` style="width:${widths[i]}"` : ''}>${c}</span>`).join('')}<span></span></div>`;
-}
-function lrRow(fields, act, idx) {
-  return `<div class="lr">${fields.map(f => `<input type="${f.t || 'text'}" id="${f.p}" value="${esc(f.v != null ? f.v : '')}" placeholder="${f.ph || ''}" style="${f.s || ''}">`).join('')}<button class="btn-sm" data-act="${act}" data-idx="${idx}">\u00D7</button></div>`;
-}
-function listEd(p, items, ph) {
-  return (items.map((it, i) => `<div class="lr"><input type="text" data-list="${p}" data-idx="${i}" value="${esc(String(it))}" placeholder="${ph}"><button class="btn-sm" data-act="del-list" data-path="${p}" data-idx="${i}">\u00D7</button></div>`).join('')) +
-    `<button class="btn-sm btn-add" data-act="add-list" data-path="${p}">+ 添加</button>`;
+function currentTabName() {
+  const activeTab = document.querySelector('#tabs .nav-tab.on');
+  return activeTab ? activeTab.dataset.t : 'basic';
 }
 
-// ===== Tab: 基础 =====
-function basic() {
-  return sec('基础设置') +
-    row(
-      sel('favour_mode', '判定模式', [['galgame', 'Galgame（易提升）'], ['realistic', '拟真（严格）']]),
-      sel('group_sort_by', '排序方式', [['default', '添加时间'], ['favour', '好感度'], ['nickname', '昵称'], ['userid', '用户ID']])
-    ) +
-    row(
-      chk('is_global_favour', '全局好感度', '跨群共享'),
-      chk('enable_relationship_table', '注入关系表', '向LLM展示会话关系')
-    ) +
-    row(
-      chk('enable_cold_violence', '启用冷暴力', '连续降低触发'),
-      num('min_favour_value', '好感度下限')
-    ) +
-    row(
-      num('max_favour_value', '好感度上限'),
-      num('default_favour', '初始好感度')
-    );
-}
+function renderTab(tabKey) {
+  const bodyEl = document.getElementById('body');
+  if (!bodyEl) return;
 
-// ===== Tab: 分级 =====
-function levels() {
-  const lvs = g('favour_levels', []);
-  return sec(`好感度分级 <span class="data-stat">至少3个 | 前7个desc可选 | 第8个起必填 | 当前 ${lvs.length} 个</span>`) +
-    lrHeader(['最低', '最高', '名称', '描述'], ['90px', '90px', '90px', '90px']) +
-    (lvs.length ? lvs.map((lv, i) => lrRow([
-      { p: `lv-min-${i}`, t: 'number', v: lv.min, ph: '最低', s: 'width:90px' },
-      { p: `lv-max-${i}`, t: 'number', v: lv.max, ph: '最高', s: 'width:90px' },
-      { p: `lv-name-${i}`, v: lv.name, ph: '等级名称', s: 'width:90px' },
-      { p: `lv-desc-${i}`, v: lv.desc || '', ph: i >= 7 ? '(必填)描述' : '(可选)描述', s: 'flex:1;width:90px' }
-    ], 'del-level', i)).join('') : '<p class="dim">暂无分级，请添加。</p>') +
-    '<button class="btn-sm btn-add" data-act="add-level" style="margin-top:8px">+ 添加分级</button>';
-}
-
-// ===== Tab: 衰减 =====
-function decay() {
-  const mode = g('favour_decay.mode', 'linear');
-  let body = mode === 'linear'
-    ? row(num2('favour_decay.inactive_days', '无互动天数'), num2('favour_decay.decay_amount', '每次减少点数'))
-    : card('分级规则',
-        lrHeader(['最低好感', '最高好感', '天数', '衰减量', '底线'], ['70px', '70px', '55px', '100px', '55px']) +
-        ((g('favour_decay.advanced_rules', []).map((r, i) => lrRow([
-          { p: `adv-min-${i}`, t: 'number', v: r.min_favour, ph: '最低好感', s: 'width:70px' },
-          { p: `adv-max-${i}`, t: 'number', v: r.max_favour, ph: '最高好感', s: 'width:70px' },
-          { p: `adv-days-${i}`, t: 'number', v: r.inactive_days, ph: '天数', s: 'width:55px' },
-          { p: `adv-amt-${i}`, t: 'number', v: r.decay_amount, ph: '衰减量', s: 'width:100px' },
-          { p: `adv-floor-${i}`, t: 'number', v: r.floor != null ? r.floor : '', ph: '底线', s: 'width:90px' }
-        ], 'del-adv', i)).join('')) || '<p class="dim">暂无规则</p>') +
-        '<button class="btn-sm btn-add" data-act="add-adv" style="margin-top:6px">+ 添加规则</button>'
-      );
-  return sec('好感度衰减') +
-    row(chk('favour_decay.enabled', '启用衰减'), sel('favour_decay.mode', '衰减模式', [['linear', '线性（统一速度）'], ['advanced', '分级（按好感度区间）']])) +
-    num2('favour_decay.floor_favour', '全局衰减底线（留空=好感度下限）') +
-    body;
-}
-
-// ===== Tab: 搭话 =====
-function active() {
-  const rules = g('active_chat.rules', []);
-  return sec('主动搭话') +
-    row(chk('active_chat.enabled', '启用主动搭话', '根据好感度概率主动发起对话'), '') +
-    row(txt2('active_chat.time_start', '开始时间 HH:MM'), txt2('active_chat.time_end', '结束时间 HH:MM')) +
-    row(num2('active_chat.interval_hours', '检查间隔（小时）'), num2('active_chat.max_sessions_per_round', '每轮最多触发会话数（0=不限）')) +
-    card('概率规则（按好感度区间，百分比）',
-      lrHeader(['最低好感', '最高好感', '概率%'], ['80px', '80px', '70px']) +
-      (rules.length ? rules.map((r, i) => lrRow([
-        { p: `act-min-${i}`, t: 'number', v: r.min_favour, ph: '最低好感', s: 'width:80px' },
-        { p: `act-max-${i}`, t: 'number', v: r.max_favour, ph: '最高好感', s: 'width:80px' },
-        { p: `act-prob-${i}`, t: 'number', v: r.probability, ph: '概率%', s: 'width:70px' }
-      ], 'del-act', i)).join('') : '<p class="dim">暂无规则</p>') +
-      '<button class="btn-sm btn-add" data-act="add-act" style="margin-top:6px">+ 添加规则</button>'
-    ) +
-    card('搭话会话黑名单', listEd('active_chat.blocked_sessions', g('active_chat.blocked_sessions', []), '会话ID')) +
-    card('搭话会话白名单（空=全部允许）', listEd('active_chat.allowed_sessions', g('active_chat.allowed_sessions', []), '会话ID')) +
-    txt('active_chat.llm_prompt', 'LLM 搭话提示词 <span class="tip-icon" data-tip="占位符说明（点击固定提示）：\n{current_time} \u2014 当前系统时间\n{last_interaction_ago} \u2014 距上次互动时长\n{favour} \u2014 当前好感度数值\n{relationship} \u2014 当前关系\n{user_name} \u2014 用户 ID">?</span>', 6, '占位符：{current_time}, {last_interaction_ago}, {favour}, {relationship}, {user_name}');
-}
-
-// ===== Tab: 权限 =====
-function perm() {
-  return sec('查询权限') +
-    '<p style="font-size:0.82rem;color:var(--c-text-dim);margin-bottom:12px;">管理员始终可查</p>' +
-    row(
-      sel('query_permission.group_normal_user', '群聊查询', [[true, '允许所有人查询'], [false, '仅管理员可查']]),
-      sel('query_permission.private_normal_user', '私聊查询', [[true, '允许所有人查询'], [false, '仅管理员可查']])
-    ) +
-    sec('指令权限') +
-    sel('advanced_config.modify_favour_permission', '修改好感度最低权限', [['admin', '群管理员及以上'], ['owner', '群主及以上'], ['superuser', '仅Bot管理员']]);
-}
-
-// ===== Tab: 高级 =====
-function adv() {
-  return sec('高级配置') +
-    row(num2('advanced_config.admin_default_favour', '管理员初始好感度'), num2('advanced_config.level_threshold', '群等级阈值')) +
-    row(num2('advanced_config.favour_increase_min', '上升最小值'), num2('advanced_config.favour_increase_max', '上升最大值')) +
-    row(num2('advanced_config.favour_decrease_min', '下降最小值'), num2('advanced_config.favour_decrease_max', '下降最大值')) +
-    card('好感度特使（一行一个ID）', listEd('advanced_config.favour_envoys', g('advanced_config.favour_envoys', []), '用户ID')) +
-    card('会话黑名单', listEd('advanced_config.blocked_sessions', g('advanced_config.blocked_sessions', []), '会话ID')) +
-    card('会话白名单（空=全部启用）', listEd('advanced_config.allowed_sessions', g('advanced_config.allowed_sessions', []), '会话ID'));
-}
-
-// ===== Tab: 冷暴力 =====
-function cold() {
-  return sec('冷暴力设置') +
-    row(num2('cold_violence_config.consecutive_decrease_threshold', '连续降低触发次数'), num2('cold_violence_config.duration_minutes', '持续时间（分钟）')) +
-    row(chk('cold_violence_config.is_global', '全局生效'), chk('cold_violence_config.auto_blacklist_on_min', '达最低时自动拉黑')) +
-    card('自定义回复（{time_str}=剩余时间）',
-      txt2('cold_violence_config.replies.on_trigger', '触发时附加消息') +
-      txt2('cold_violence_config.replies.on_message', '拦截消息时回复') +
-      txt2('cold_violence_config.replies.on_query', '查询好感度时回复')
-    );
-}
-
-// ===== Tab: 数据管理 =====
-// 缓存已加载的原始数据，避免每次搜索/切换都重新请求 API
-let _dataCache = null;        // { global: [], non_global: [] }
-let _dataViewMode = 'brief';  // 'brief' = 简略, 'detail' = 详细
-
-// webchat SID 特例：截断乱码部分，只显示有意义的前缀
-function shortSid(sid) {
-  if (!sid) return '';
-  // webchat SID 格式: webchat:MessageType:webchat!astrbot!一串乱码
-  // 截断 webchat!astrbot! 后面的部分
-  return sid.replace(/(webchat![^!]*!).*$/, '$1...');
-}
-
-function data() {
-  return `<div>
-    <div class="search-wrap">
-      <input type="text" id="data-search" class="data-search" placeholder="搜索用户ID / 用户名 / 关系 / 会话ID...">
-    </div>
-    <div class="data-hint">同时匹配用户信息和会话ID(SID)，输入关键词即可筛选</div>
-    <div class="data-toolbar">
-      <div></div>
-      <div class="data-toolbar-right">
-        <button class="btn-sm" id="toggle-view-mode">展开详细视图</button>
-        <button class="btn-sm btn-add" data-act="refresh-data">\u21BB 刷新</button>
-      </div>
-    </div>
-    <div id="data-panel"><div class="dim">加载中...</div></div>
-  </div>`;
-}
-
-function initDataTab() {
-  const searchEl = $('data-search');
-  const toggleView = $('toggle-view-mode');
-
-  if (searchEl) searchEl.oninput = () => applyDataFilter();
-  if (toggleView) toggleView.onclick = () => {
-    _dataViewMode = _dataViewMode === 'brief' ? 'detail' : 'brief';
-    updateViewModeUI();
-    renderDataFromCache();
+  const tabRenderers = {
+    basic: renderBasicTab,
+    levels: renderLevelsTab,
+    decay: renderDecayTab,
+    active: renderActiveTab,
+    perm: renderPermTab,
+    adv: renderAdvTab,
+    cold: renderColdTab,
+    data: renderDataTab,
+    migrate: renderMigrateTab,
+    backup: renderBackupTab,
   };
 
-  updateViewModeUI();
-  requestAnimationFrame(() => loadDataPanel());
-}
+  const renderer = tabRenderers[tabKey] || renderBasicTab;
+  bodyEl.innerHTML = renderer();
+  bindTabEvents(tabKey);
+  bindCustomSelects();
 
-function updateViewModeUI() {
-  const btn = $('toggle-view-mode');
-  if (btn) btn.textContent = _dataViewMode === 'brief' ? '展开详细视图' : '收起为简略视图';
-}
-
-// 加载数据（仅在首次或刷新时调 API）
-async function loadDataPanel() {
-  const panel = $('data-panel');
-  if (!panel) return;
-
-  try {
-    panel.innerHTML = '<div class="dim">加载中...</div>';
-    _dataCache = await bridge.apiGet('datarecords');
-    renderDataFromCache();
-  } catch (e) {
-    console.error('[数据管理] 加载失败:', e);
-    panel.innerHTML = '<p class="dim" style="color:var(--c-error)">加载失败: ' + esc(e.message || String(e)) + '</p>';
+  if (tabKey === 'levels') {
+    updateLevelSpectrum();
+  } else if (tabKey === 'data') {
+    initDataTabLogic();
+  } else if (tabKey === 'migrate') {
+    initMigrateTabLogic();
+  } else if (tabKey === 'backup') {
+    initBackupTabLogic();
   }
 }
 
-// 搜索过滤逻辑（同时匹配用户信息和 SID）
-function applyDataFilter() {
-  const q = ($('data-search')?.value || '').trim().toLowerCase();
+// ==================== 工具函数 ====================
 
-  if (!q) {
-    renderDataFromCache();
+function deepClone(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+function getVal(path, defVal = null) {
+  const keys = path.split('.');
+  let curr = config;
+  for (const k of keys) {
+    if (curr == null || typeof curr !== 'object') return defVal;
+    curr = curr[k];
+  }
+  return curr !== undefined ? curr : defVal;
+}
+
+function setVal(path, value) {
+  const keys = path.split('.');
+  let curr = config;
+  for (let i = 0; i < keys.length - 1; i++) {
+    const k = keys[i];
+    if (!(k in curr) || typeof curr[k] !== 'object') {
+      curr[k] = {};
+    }
+    curr = curr[k];
+  }
+  curr[keys[keys.length - 1]] = value;
+}
+
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ==================== UI 控件构建器 ====================
+
+function uiBentoCard({ title, desc = '', iconSvg = '', content = '', fullWidth = false }) {
+  return `
+    <div class="bento-card ${fullWidth ? 'full-width' : ''}">
+      <div class="bento-header">
+        <div class="bento-title-group">
+          ${iconSvg ? `<div class="bento-icon-badge">${iconSvg}</div>` : ''}
+          <div>
+            <div class="bento-title">${title}</div>
+            ${desc ? `<div class="bento-desc">${desc}</div>` : ''}
+          </div>
+        </div>
+      </div>
+      <div class="bento-body">
+        ${content}
+      </div>
+    </div>
+  `;
+}
+
+function uiSwitch({ path, label, desc = '' }) {
+  const checked = getVal(path, false);
+  const id = 'sw-' + path.replace(/\./g, '-');
+  return `
+    <div class="form-group">
+      <input type="checkbox" id="${id}" class="hidden-checkbox" data-p="${path}" ${checked ? 'checked' : ''}>
+      <label for="${id}" class="switch-card ${checked ? 'active' : ''}">
+        <div class="switch-info">
+          <div class="switch-title">${label}</div>
+          ${desc ? `<div class="switch-desc">${desc}</div>` : ''}
+        </div>
+        <div class="switch-ctrl"></div>
+      </label>
+    </div>
+  `;
+}
+
+function uiInput({ path, label, type = 'text', hint = '', placeholder = '' }) {
+  const val = getVal(path, '');
+  return `
+    <div class="form-group">
+      <label class="form-label">
+        <span>${label}</span>
+        ${hint ? `<span class="form-label-hint">${hint}</span>` : ''}
+      </label>
+      <input type="${type}" class="form-input" data-p="${path}" value="${escapeHtml(val)}" placeholder="${placeholder}">
+    </div>
+  `;
+}
+
+function uiNumber({ path, label, hint = '', placeholder = '', min = null, max = null }) {
+  const val = getVal(path, 0);
+  return `
+    <div class="form-group">
+      <label class="form-label">
+        <span>${label}</span>
+        ${hint ? `<span class="form-label-hint">${hint}</span>` : ''}
+      </label>
+      <input type="number" class="form-input" data-p="${path}" value="${val != null ? val : ''}" 
+        placeholder="${placeholder}" ${min !== null ? `min="${min}"` : ''} ${max !== null ? `max="${max}"` : ''}>
+    </div>
+  `;
+}
+
+/**
+ * 全新定制下拉选单组件 UI 生成器
+ */
+function uiSelect({ path, label, options = [], hint = '' }) {
+  const currVal = getVal(path, '');
+  const selectedOpt = options.find(([val]) => String(val) === String(currVal)) || options[0] || ['', '请选择'];
+  const currLabel = selectedOpt[1];
+
+  return `
+    <div class="form-group">
+      <label class="form-label">
+        <span>${label}</span>
+        ${hint ? `<span class="form-label-hint">${hint}</span>` : ''}
+      </label>
+      <div class="custom-select-container" data-custom-select data-p="${path}">
+        <input type="hidden" data-p="${path}" value="${escapeHtml(currVal)}">
+        <button type="button" class="custom-select-trigger" aria-haspopup="listbox">
+          <span class="custom-select-value">${escapeHtml(currLabel)}</span>
+          <svg class="custom-select-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+        <div class="custom-select-menu" role="listbox">
+          ${options.map(([optVal, optLabel]) => {
+            const isSelected = String(currVal) === String(optVal);
+            return `
+              <div class="custom-select-option ${isSelected ? 'selected' : ''}" data-val="${escapeHtml(optVal)}" role="option">
+                <span class="custom-select-option-text">${escapeHtml(optLabel)}</span>
+                <svg class="custom-select-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * 独立下拉选单 UI 生成器 (用于工具栏或特定操作)
+ */
+function renderStandaloneCustomSelect({ id, value, options = [], placeholder = '请选择', extraClass = '' }) {
+  const selectedOpt = options.find(([val]) => String(val) === String(value)) || options[0] || ['', placeholder];
+  const currLabel = selectedOpt[1];
+
+  return `
+    <div class="custom-select-container ${extraClass}" data-custom-select id="${id}">
+      <input type="hidden" value="${escapeHtml(value)}">
+      <button type="button" class="custom-select-trigger" aria-haspopup="listbox">
+        <span class="custom-select-value">${escapeHtml(currLabel)}</span>
+        <svg class="custom-select-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+      <div class="custom-select-menu" role="listbox">
+        ${options.map(([optVal, optLabel]) => {
+          const isSelected = String(value) === String(optVal);
+          return `
+            <div class="custom-select-option ${isSelected ? 'selected' : ''}" data-val="${escapeHtml(optVal)}" role="option">
+              <span class="custom-select-option-text">${escapeHtml(optLabel)}</span>
+              <svg class="custom-select-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function uiTextarea({ path, label, rows = 4, hint = '', placeholder = '', pills = [] }) {
+  const val = getVal(path, '');
+  return `
+    <div class="form-group full">
+      <label class="form-label">
+        <span>${label}</span>
+        ${hint ? `<span class="form-label-hint">${hint}</span>` : ''}
+      </label>
+      <textarea class="form-textarea" data-p="${path}" rows="${rows}" placeholder="${placeholder}">${escapeHtml(val)}</textarea>
+      ${pills.length ? `
+        <div class="pill-group">
+          ${pills.map((p) => `<span class="pill-tag" data-insert="${p.code}" title="${p.desc}">+ ${p.code}</span>`).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function uiStringList({ path, label, placeholder = '输入项...' }) {
+  const list = getVal(path, []);
+  return `
+    <div class="form-group full">
+      <label class="form-label">${label}</label>
+      <div class="dyn-list-container">
+        ${list.map((item, idx) => `
+          <div class="dyn-row-card">
+            <span class="dyn-index-badge">${idx + 1}</span>
+            <input type="text" class="form-input" data-list-p="${path}" data-list-idx="${idx}" value="${escapeHtml(item)}" placeholder="${placeholder}">
+            <button class="btn-ghost-danger" data-act="del-list-item" data-path="${path}" data-idx="${idx}" title="删除此项">&times;</button>
+          </div>
+        `).join('')}
+      </div>
+      <button class="btn-dashed-add" data-act="add-list-item" data-path="${path}">+ 添加一项</button>
+    </div>
+  `;
+}
+
+// ==================== 1. 基础设置 Tab ====================
+
+function renderBasicTab() {
+  return `
+    <div class="bento-grid">
+      ${uiBentoCard({
+        title: '好感度运行模式',
+        desc: '调整好感度评定准则与排序机制',
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiSelect({
+              path: 'favour_mode',
+              label: '判定模式',
+              options: [
+                ['galgame', 'Galgame 模式（容易提升，情感丰富）'],
+                ['realistic', '拟真模式（严格严谨，步长适中）']
+              ],
+              hint: '影响提升好感度的宽容度'
+            })}
+            ${uiSelect({
+              path: 'group_sort_by',
+              label: '列表排序方式',
+              options: [
+                ['default', '默认（添加时间）'],
+                ['favour', '按好感度降序'],
+                ['nickname', '按用户昵称'],
+                ['userid', '按用户 ID']
+              ]
+            })}
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '好感度极值与初始值',
+        desc: '好感度点数边界约束',
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 16V4M17 20v-8M3 20h18"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiNumber({ path: 'min_favour_value', label: '好感度下限', hint: '默认 -200' })}
+            ${uiNumber({ path: 'max_favour_value', label: '好感度上限', hint: '默认 1000' })}
+            ${uiNumber({ path: 'default_favour', label: '新用户初始好感', hint: '默认 0' })}
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '全局与跨群策略',
+        desc: '跨会话共享与关系表注入',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiSwitch({
+              path: 'is_global_favour',
+              label: '全局好感度模式',
+              desc: '开启后所有群聊与私聊共享同一个好感度数值'
+            })}
+            ${uiSwitch({
+              path: 'enable_relationship_table',
+              label: '向 LLM 注入关系表',
+              desc: '在系统提示中动态插入当前会话用户关系状态'
+            })}
+            ${uiSwitch({
+              path: 'enable_cold_violence',
+              label: '冷暴力系统总开关',
+              desc: '当好感度连续降低时触发惩罚与冷淡回复'
+            })}
+          </div>
+        `
+      })}
+    </div>
+  `;
+}
+
+// ==================== 2. 好感分级 Tab ====================
+
+function renderLevelsTab() {
+  const levels = getVal('favour_levels', []);
+  return `
+    <div class="bento-card full-width">
+      <div class="bento-header">
+        <div class="bento-title-group">
+          <div class="bento-icon-badge">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+          </div>
+          <div>
+            <div class="bento-title">好感度等级区间与人设反应</div>
+            <div class="bento-desc">至少设置 3 个分级；前 7 个描述可选，第 8 个起描述必填。</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 可视化光谱栏 -->
+      <div class="spectrum-container">
+        <div class="spectrum-header">
+          <span>好感度连续谱预览</span>
+          <span id="spectrum-summary">${levels.length} 个等级阶段</span>
+        </div>
+        <div class="spectrum-bar-wrap" id="level-spectrum-bar"></div>
+      </div>
+
+      <!-- 分级列表 -->
+      <div class="dyn-list-container" id="level-list-body">
+        ${levels.map((lv, idx) => `
+          <div class="dyn-row-card">
+            <span class="dyn-index-badge">${idx + 1}</span>
+            <div class="dyn-fields">
+              <input type="number" class="form-input" style="max-width:90px" id="lv-min-${idx}" value="${lv.min}" placeholder="Min" title="最低分">
+              <span style="color:var(--text-dim)">~</span>
+              <input type="number" class="form-input" style="max-width:90px" id="lv-max-${idx}" value="${lv.max}" placeholder="Max" title="最高分">
+              <input type="text" class="form-input" style="max-width:130px" id="lv-name-${idx}" value="${escapeHtml(lv.name)}" placeholder="等级名称">
+              <input type="text" class="form-input" style="flex:1;min-width:200px" id="lv-desc-${idx}" value="${escapeHtml(lv.desc || '')}" placeholder="${idx >= 7 ? '(必填) 角色态度描述' : '(可选) 角色态度描述'}">
+            </div>
+            <button class="btn-ghost-danger" data-act="del-level-row" data-idx="${idx}" title="删除该分级">&times;</button>
+          </div>
+        `).join('')}
+      </div>
+
+      <button class="btn-dashed-add" data-act="add-level-row">+ 添加新分级</button>
+    </div>
+  `;
+}
+
+function updateLevelSpectrum() {
+  const bar = document.getElementById('level-spectrum-bar');
+  if (!bar) return;
+
+  const levels = getVal('favour_levels', []);
+  if (!levels.length) {
+    bar.innerHTML = '<div style="padding:4px 12px;font-size:0.75rem;color:var(--text-dim);">暂无分级数据</div>';
     return;
   }
 
-  // 构建过滤器：分组级 SID 匹配 + 行级用户信息匹配
-  // 如果某分组的 SID 包含关键词 → 整组显示
-  // 否则在详细视图中按行匹配用户信息
-  renderDataFromCache(null, q);
+  const colors = [
+    '#f43f5e', '#FF9AC6', '#FFBDD6', '#f59e0b', '#10b981', '#B0DDFE', '#B7B6FF', '#a855f7', '#ec4899'
+  ];
+
+  let html = '';
+  levels.forEach((lv, idx) => {
+    const color = colors[idx % colors.length];
+    html += `
+      <div class="spectrum-segment" style="flex:1;background:${color}" title="${escapeHtml(lv.name)} (${lv.min} ~ ${lv.max})">
+        ${escapeHtml(lv.name)}
+      </div>
+    `;
+  });
+  bar.innerHTML = html;
 }
 
-// 核心渲染函数
-// groupFilter: (group) => bool，过滤分组（可选）
-// searchQuery: string，统一搜索词（可选），同时匹配 SID 和用户信息
-function renderDataFromCache(groupFilter, searchQuery) {
-  const panel = $('data-panel');
-  if (!panel || !_dataCache) return;
+// ==================== 3. 衰减机制 Tab ====================
+
+function renderDecayTab() {
+  const mode = getVal('favour_decay.mode', 'linear');
+  const advRules = getVal('favour_decay.advanced_rules', []);
+
+  return `
+    <div class="bento-grid">
+      ${uiBentoCard({
+        title: '衰减基本控制',
+        desc: '控制好感度在长时间未互动时的自然流失',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiSwitch({
+              path: 'favour_decay.enabled',
+              label: '启用好感度衰减',
+              desc: '开启后将按设定的周期自动检查并扣减好感'
+            })}
+            ${uiSelect({
+              path: 'favour_decay.mode',
+              label: '衰减模式',
+              options: [
+                ['linear', '线性衰减（统一未互动天数与扣除点数）'],
+                ['advanced', '分级衰减（按好感度区间动态调整）']
+              ]
+            })}
+            ${uiNumber({
+              path: 'favour_decay.floor_favour',
+              label: '全局衰减底线',
+              hint: '好感降低到此值不再扣除，留空则为好感度下限',
+              placeholder: '留空表示不限制底线'
+            })}
+          </div>
+        `
+      })}
+
+      ${mode === 'linear' ? uiBentoCard({
+        title: '线性衰减规则',
+        desc: '所有用户统一遵循的衰减参数',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20L20 4M20 4H10M20 4v10"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiNumber({ path: 'favour_decay.inactive_days', label: '无互动触发天数', hint: '例如 7 天' })}
+            ${uiNumber({ path: 'favour_decay.decay_amount', label: '每次衰减点数', hint: '例如 5 点' })}
+          </div>
+        `
+      }) : uiBentoCard({
+        title: '分级衰减规则表',
+        desc: '按当前好感度区间匹配不同的流失速度',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18M7 16l4-4 4 4 6-6"/></svg>',
+        content: `
+          <div class="dyn-list-container">
+            ${advRules.map((r, idx) => `
+              <div class="dyn-row-card">
+                <span class="dyn-index-badge">${idx + 1}</span>
+                <div class="dyn-fields">
+                  <input type="number" class="form-input" style="max-width:90px" id="adv-min-${idx}" value="${r.min_favour}" placeholder="Min 好感">
+                  <span style="color:var(--text-dim)">~</span>
+                  <input type="number" class="form-input" style="max-width:90px" id="adv-max-${idx}" value="${r.max_favour}" placeholder="Max 好感">
+                  <input type="number" class="form-input" style="max-width:100px" id="adv-days-${idx}" value="${r.inactive_days}" placeholder="天数">
+                  <input type="number" class="form-input" style="max-width:100px" id="adv-amt-${idx}" value="${r.decay_amount}" placeholder="衰减量">
+                  <input type="number" class="form-input" style="max-width:100px" id="adv-floor-${idx}" value="${r.floor != null ? r.floor : ''}" placeholder="衰减底线">
+                </div>
+                <button class="btn-ghost-danger" data-act="del-adv-row" data-idx="${idx}" title="删除规则">&times;</button>
+              </div>
+            `).join('')}
+          </div>
+          <button class="btn-dashed-add" data-act="add-adv-row">+ 添加衰减规则</button>
+        `
+      })}
+    </div>
+  `;
+}
+
+// ==================== 4. 主动搭话 Tab ====================
+
+function renderActiveTab() {
+  const rules = getVal('active_chat.rules', []);
+  const promptPills = [
+    { code: '{current_time}', desc: '当前系统时间' },
+    { code: '{last_interaction_ago}', desc: '距上次互动时长' },
+    { code: '{favour}', desc: '当前好感度数值' },
+    { code: '{relationship}', desc: '当前关系名称' },
+    { code: '{user_name}', desc: '目标用户ID或昵称' },
+  ];
+
+  return `
+    <div class="bento-grid">
+      ${uiBentoCard({
+        title: '主动搭话总控与调度',
+        desc: '定时巡检符合好感度的活跃用户并发起交谈',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiSwitch({
+              path: 'active_chat.enabled',
+              label: '启用主动搭话功能',
+              desc: '允许 Bot 在设定的时间段内随机主动向用户发消息'
+            })}
+            ${uiInput({ path: 'active_chat.time_start', label: '允许搭话开始时间', placeholder: '08:00' })}
+            ${uiInput({ path: 'active_chat.time_end', label: '允许搭话结束时间', placeholder: '23:30' })}
+          </div>
+          <div class="form-row" style="margin-top:12px;">
+            ${uiNumber({ path: 'active_chat.interval_hours', label: '巡检时间间隔（小时）', hint: '默认 2 小时' })}
+            ${uiNumber({ path: 'active_chat.max_sessions_per_round', label: '每轮最多触发会话数', hint: '0 表示不限制' })}
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '好感度触发概率矩阵',
+        desc: '根据用户当前好感度区间匹配发起对话的概率百分比 (%)',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
+        content: `
+          <div class="dyn-list-container">
+            ${rules.map((r, idx) => `
+              <div class="dyn-row-card">
+                <span class="dyn-index-badge">${idx + 1}</span>
+                <div class="dyn-fields">
+                  <input type="number" class="form-input" style="max-width:110px" id="act-min-${idx}" value="${r.min_favour}" placeholder="最低好感">
+                  <span style="color:var(--text-dim)">~</span>
+                  <input type="number" class="form-input" style="max-width:110px" id="act-max-${idx}" value="${r.max_favour}" placeholder="最高好感">
+                  <input type="number" class="form-input" style="max-width:130px" id="act-prob-${idx}" value="${r.probability}" placeholder="触发概率 %">
+                </div>
+                <button class="btn-ghost-danger" data-act="del-act-row" data-idx="${idx}" title="删除规则">&times;</button>
+              </div>
+            `).join('')}
+          </div>
+          <button class="btn-dashed-add" data-act="add-act-row">+ 添加概率规则</button>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: 'LLM 搭话引导提示词 (Prompt)',
+        desc: '指导模型生成主动搭话开场白，可点击下方药丸快速插入变量',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1010 10H12V2z"/></svg>',
+        content: `
+          ${uiTextarea({
+            path: 'active_chat.llm_prompt',
+            label: '提示词模板',
+            rows: 6,
+            pills: promptPills
+          })}
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '搭话会话黑名单',
+        desc: '这些会话绝不会触发主动搭话',
+        content: uiStringList({ path: 'active_chat.blocked_sessions', label: '黑名单会话 UMO 列表', placeholder: 'aiocqhttp:GroupMessage:xxx' })
+      })}
+
+      ${uiBentoCard({
+        title: '搭话会话白名单',
+        desc: '留空表示允许全部；若填入则仅这些会话允许搭话',
+        content: uiStringList({ path: 'active_chat.allowed_sessions', label: '白名单会话 UMO 列表', placeholder: 'aiocqhttp:GroupMessage:xxx' })
+      })}
+    </div>
+  `;
+}
+
+// ==================== 5. 权限体系 Tab ====================
+
+function renderPermTab() {
+  return `
+    <div class="bento-grid">
+      ${uiBentoCard({
+        title: '好感度查询权限',
+        desc: '控制普通用户是否能够使用查询指令',
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiSelect({
+              path: 'query_permission.group_normal_user',
+              label: '群聊普通用户查询',
+              options: [
+                [true, '允许所有人查询'],
+                [false, '仅管理员可查']
+              ]
+            })}
+            ${uiSelect({
+              path: 'query_permission.private_normal_user',
+              label: '私聊普通用户查询',
+              options: [
+                [true, '允许所有人查询'],
+                [false, '仅管理员可查']
+              ]
+            })}
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '管理指令权限门槛',
+        desc: '修改好感度等特权指令所需的最低身份',
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiSelect({
+              path: 'advanced_config.modify_favour_permission',
+              label: '修改好感度最低权限',
+              options: [
+                ['admin', '群管理员及以上 (Admin)'],
+                ['owner', '群主及以上 (Owner)'],
+                ['superuser', '仅 Bot 管理员 (Superuser)']
+              ]
+            })}
+          </div>
+        `
+      })}
+    </div>
+  `;
+}
+
+// ==================== 6. 高级调节 Tab ====================
+
+function renderAdvTab() {
+  return `
+    <div class="bento-grid">
+      ${uiBentoCard({
+        title: '好感度增减步长限制',
+        desc: '单次互动好感度上升与下降的波动范围',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiNumber({ path: 'advanced_config.favour_increase_min', label: '好感上升最小值', hint: '默认 1' })}
+            ${uiNumber({ path: 'advanced_config.favour_increase_max', label: '好感上升最大值', hint: '默认 3' })}
+            ${uiNumber({ path: 'advanced_config.favour_decrease_min', label: '好感下降最小值', hint: '默认 1' })}
+            ${uiNumber({ path: 'advanced_config.favour_decrease_max', label: '好感下降最大值', hint: '默认 5' })}
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '管理与群等级阈值',
+        desc: '特权与初始好感配置',
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiNumber({ path: 'advanced_config.admin_default_favour', label: '管理员初始好感', hint: '默认 50' })}
+            ${uiNumber({ path: 'advanced_config.level_threshold', label: '群等级阈值', hint: '默认 50' })}
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '好感度特使名单',
+        desc: '特殊身份用户列表（不受常规好感度惩罚等）',
+        content: uiStringList({ path: 'advanced_config.favour_envoys', label: '特使 User ID 列表', placeholder: '输入用户 ID...' })
+      })}
+
+      ${uiBentoCard({
+        title: '全局会话黑名单',
+        desc: '插件将完全忽略这些会话的所有交互',
+        content: uiStringList({ path: 'advanced_config.blocked_sessions', label: '黑名单会话 UMO 列表', placeholder: 'aiocqhttp:GroupMessage:xxx' })
+      })}
+
+      ${uiBentoCard({
+        title: '全局会话白名单',
+        desc: '留空表示全部启用；若填入则仅对这些会话生效',
+        content: uiStringList({ path: 'advanced_config.allowed_sessions', label: '白名单会话 UMO 列表', placeholder: 'aiocqhttp:GroupMessage:xxx' })
+      })}
+    </div>
+  `;
+}
+
+// ==================== 7. 冷暴力 Tab ====================
+
+function renderColdTab() {
+  return `
+    <div class="bento-grid">
+      ${uiBentoCard({
+        title: '冷暴力触发机制',
+        desc: '连续惹恼 Bot 时的惩罚行为控制',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiNumber({ path: 'cold_violence_config.consecutive_decrease_threshold', label: '连续降低好感触发次数', hint: '默认 3 次' })}
+            ${uiNumber({ path: 'cold_violence_config.duration_minutes', label: '冷暴力持续时间 (分钟)', hint: '默认 30 分钟' })}
+          </div>
+          <div class="form-row" style="margin-top:12px;">
+            ${uiSwitch({
+              path: 'cold_violence_config.is_global',
+              label: '跨会话全局冷暴力',
+              desc: '开启后该用户在所有群聊/私聊都将被同时冷落'
+            })}
+            ${uiSwitch({
+              path: 'cold_violence_config.auto_blacklist_on_min',
+              label: '达好感下限时自动拉黑',
+              desc: '好感度跌至最低值时不再响应并拉黑该用户'
+            })}
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '自定义冷淡回复词条',
+        desc: '占位符 {time_str} 将自动替换为剩余冷却时间',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiInput({ path: 'cold_violence_config.replies.on_trigger', label: '刚触发冷暴力时的附加提示' })}
+            ${uiInput({ path: 'cold_violence_config.replies.on_message', label: '冷暴力期间拦截对话的回复' })}
+            ${uiInput({ path: 'cold_violence_config.replies.on_query', label: '冷暴力期间查询好感时的回复' })}
+          </div>
+        `
+      })}
+    </div>
+  `;
+}
+
+// ==================== 8. 数据中心 Tab (增强折叠与排序) ====================
+
+let _dataCache = null;
+let _dataFilterType = 'all'; // 'all' | 'private' | 'group' | 'global'
+let _dataSearchQuery = '';
+let _dataSortMode = 'favour_desc'; // 'favour_desc' | 'favour_asc' | 'uid_asc' | 'uid_desc' | 'unique_first' | 'username_asc'
+let _openFolderKeys = new Set(); // 记录当前展开的折叠卡片 key
+
+function renderDataTab() {
+  const sortOptions = [
+    ['favour_desc', '好感度 (高 → 低)'],
+    ['favour_asc', '好感度 (低 → 高)'],
+    ['uid_asc', '按 UID 升序 (0 → 9)'],
+    ['uid_desc', '按 UID 降序 (9 → 0)'],
+    ['unique_first', '关系唯一性优先'],
+    ['username_asc', '按用户昵称 (A → Z)']
+  ];
+
+  return `
+    <div>
+      <!-- 统计指标卡片 -->
+      <div class="stats-banner" id="data-stats-banner">
+        <div class="stat-box">
+          <div class="stat-icon-wrap indigo">
+            <svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-val" id="stat-total-records">--</div>
+            <div class="stat-lbl">总好感记录</div>
+          </div>
+        </div>
+
+        <div class="stat-box">
+          <div class="stat-icon-wrap emerald">
+            <svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-val" id="stat-peak-favour">--</div>
+            <div class="stat-lbl">最高好感度</div>
+          </div>
+        </div>
+
+        <div class="stat-box">
+          <div class="stat-icon-wrap amber">
+            <svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-val" id="stat-sessions-count">--</div>
+            <div class="stat-lbl">覆盖会话数</div>
+          </div>
+        </div>
+
+        <div class="stat-box">
+          <div class="stat-icon-wrap rose">
+            <svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-val" id="stat-min-favour">--</div>
+            <div class="stat-lbl">最低好感度</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 搜索与排序工具栏 -->
+      <div class="data-toolbar-card">
+        <div class="data-search-row">
+          <div class="search-input-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="data-search-box" class="search-input" placeholder="实时搜索 用户ID / 用户名 / 关系称号 / 会话 UMO...">
+          </div>
+
+          <!-- 定制排序下拉选单 -->
+          <div class="sort-control-container">
+            <div class="sort-label">
+              <svg style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+              <span>排序:</span>
+            </div>
+            ${renderStandaloneCustomSelect({
+              id: 'data-sort-select',
+              value: _dataSortMode,
+              options: sortOptions,
+              extraClass: 'inline-sort'
+            })}
+          </div>
+        </div>
+
+        <div class="filter-pills-row">
+          <div class="filter-pills" id="data-type-pills">
+            <button class="filter-chip ${_dataFilterType === 'all' ? 'active' : ''}" data-filter="all">全部展示</button>
+            <button class="filter-chip ${_dataFilterType === 'group' ? 'active' : ''}" data-filter="group">仅群聊</button>
+            <button class="filter-chip ${_dataFilterType === 'private' ? 'active' : ''}" data-filter="private">仅私聊</button>
+            <button class="filter-chip ${_dataFilterType === 'global' ? 'active' : ''}" data-filter="global">仅全局</button>
+          </div>
+
+          <div class="toolbar-actions-right">
+            <button class="btn-outline" style="padding:4px 10px;font-size:0.78rem" id="btn-toggle-all-folders">全部展开</button>
+            <button class="btn-outline" style="padding:4px 10px;font-size:0.78rem" id="btn-refresh-data">
+              <svg style="width:13px;height:13px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+              <span>刷新</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 折叠列表容器 -->
+      <div id="data-records-view">
+        <div style="text-align:center;padding:40px;color:var(--text-dim)">正在加载数据中心...</div>
+      </div>
+    </div>
+  `;
+}
+
+async function initDataTabLogic() {
+  const searchBox = document.getElementById('data-search-box');
+  if (searchBox) {
+    searchBox.oninput = (e) => {
+      _dataSearchQuery = e.target.value.trim().toLowerCase();
+      renderDataRecords();
+    };
+  }
+
+  const typePillsContainer = document.getElementById('data-type-pills');
+  if (typePillsContainer) {
+    typePillsContainer.querySelectorAll('.filter-chip').forEach((btn) => {
+      btn.onclick = () => {
+        typePillsContainer.querySelectorAll('.filter-chip').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        _dataFilterType = btn.dataset.filter;
+        renderDataRecords();
+      };
+    });
+  }
+
+  const toggleAllBtn = document.getElementById('btn-toggle-all-folders');
+  if (toggleAllBtn) {
+    toggleAllBtn.onclick = () => {
+      const folders = document.querySelectorAll('.folder-card');
+      const anyClosed = Array.from(folders).some((f) => !f.classList.contains('open'));
+      folders.forEach((f) => {
+        const key = f.dataset.folderKey;
+        if (anyClosed) {
+          f.classList.add('open');
+          if (key) _openFolderKeys.add(key);
+        } else {
+          f.classList.remove('open');
+          if (key) _openFolderKeys.delete(key);
+        }
+      });
+      toggleAllBtn.textContent = anyClosed ? '全部收起' : '全部展开';
+    };
+  }
+
+  const refreshBtn = document.getElementById('btn-refresh-data');
+  if (refreshBtn) {
+    refreshBtn.onclick = () => loadDataRecords(true);
+  }
+
+  await loadDataRecords();
+}
+
+async function loadDataRecords(force = false) {
+  const view = document.getElementById('data-records-view');
+  if (!view) return;
+
+  try {
+    if (!_dataCache || force) {
+      view.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">正在加载好感度记录...</div>';
+      _dataCache = await bridge.apiGet('datarecords');
+    }
+    updateDataStats();
+    renderDataRecords();
+  } catch (err) {
+    console.error('加载数据失败:', err);
+    view.innerHTML = `<div style="text-align:center;padding:40px;color:var(--accent-rose)">加载失败: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function updateDataStats() {
+  if (!_dataCache) return;
+  const gl = _dataCache.global || [];
+  const ng = _dataCache.non_global || [];
+  const all = [...gl, ...ng];
+
+  const totalEl = document.getElementById('stat-total-records');
+  const peakEl = document.getElementById('stat-peak-favour');
+  const minEl = document.getElementById('stat-min-favour');
+  const sessEl = document.getElementById('stat-sessions-count');
+
+  if (totalEl) totalEl.textContent = all.length;
+
+  if (all.length > 0) {
+    const favs = all.map((r) => r.favour);
+    if (peakEl) peakEl.textContent = Math.max(...favs);
+    if (minEl) minEl.textContent = Math.min(...favs);
+  } else {
+    if (peakEl) peakEl.textContent = '0';
+    if (minEl) minEl.textContent = '0';
+  }
+
+  const sessions = new Set(all.map((r) => r.session_id));
+  if (sessEl) sessEl.textContent = sessions.size;
+}
+
+// 记录排序算法
+function sortRecords(records, mode) {
+  return [...records].sort((a, b) => {
+    if (mode === 'favour_desc') {
+      return b.favour - a.favour;
+    } else if (mode === 'favour_asc') {
+      return a.favour - b.favour;
+    } else if (mode === 'uid_asc') {
+      return String(a.user_id).localeCompare(String(b.user_id), undefined, { numeric: true });
+    } else if (mode === 'uid_desc') {
+      return String(b.user_id).localeCompare(String(a.user_id), undefined, { numeric: true });
+    } else if (mode === 'unique_first') {
+      if (a.is_unique !== b.is_unique) return a.is_unique ? -1 : 1;
+      return b.favour - a.favour;
+    } else if (mode === 'username_asc') {
+      return String(a.username || '').localeCompare(String(b.username || ''));
+    }
+    return 0;
+  });
+}
+
+function renderDataRecords() {
+  const view = document.getElementById('data-records-view');
+  if (!view || !_dataCache) return;
 
   const gl = _dataCache.global || [];
   const ng = _dataCache.non_global || [];
-  const isBrief = _dataViewMode === 'brief';
-  const q = searchQuery || '';
 
-  // === 按适配器（平台）分类 ===
-  const adapters = {};
-  ng.forEach(r => {
-    const plat = r.platform || 'unknown';
-    if (!adapters[plat]) adapters[plat] = { dm: [], groups: {} };
-    const a = adapters[plat];
-    const isDM = r.session_type !== 'GroupMessage';
-    if (isDM) {
-      let dmEntry = a.dm.find(d => d.sid === r.session_id);
-      if (!dmEntry) { dmEntry = { sid: r.session_id, rows: [] }; a.dm.push(dmEntry); }
-      dmEntry.rows.push(r);
+  const folders = [];
+
+  // --- A. 全局数据折叠卡片 ---
+  if (gl.length > 0 && (_dataFilterType === 'all' || _dataFilterType === 'global')) {
+    folders.push({
+      key: 'folder_global',
+      type: 'global',
+      title: '全局好感度数据',
+      subtitle: '跨群与跨私聊共享数据',
+      platform: '全局',
+      rows: gl
+    });
+  }
+
+  // --- B. 分类非全局数据 ---
+  const dmMapsByPlatform = {};
+  const groupMaps = {};
+
+  ng.forEach((r) => {
+    const isGroup = r.session_type === 'GroupMessage';
+    if (isGroup) {
+      const sid = r.session_id;
+      if (!groupMaps[sid]) {
+        groupMaps[sid] = {
+          sid,
+          platform: r.platform || 'unknown',
+          target: r.session_target || sid,
+          rows: []
+        };
+      }
+      groupMaps[sid].rows.push(r);
     } else {
-      const gk = r.session_id || r.session_target || 'unknown';
-      if (!a.groups[gk]) a.groups[gk] = { sid: r.session_id, target: r.session_target, rows: [] };
-      a.groups[gk].rows.push(r);
+      const plat = r.platform || '私聊';
+      if (!dmMapsByPlatform[plat]) dmMapsByPlatform[plat] = [];
+      dmMapsByPlatform[plat].push(r);
     }
   });
 
-  // 搜索判断辅助：某条记录是否匹配用户信息
-  function rowMatchesUser(r) {
-    if (!q) return true;
-    const haystack = [r.user_id, r.username, r.relationship].join(' ').toLowerCase();
-    return haystack.includes(q);
-  }
-  // 某个 SID 是否匹配搜索词
-  function sidMatches(sid) {
-    if (!q) return true;
-    return (sid || '').toLowerCase().includes(q);
-  }
-
-  let html = '';
-  const platKeys = Object.keys(adapters).sort();
-
-  platKeys.forEach(plat => {
-    const a = adapters[plat];
-
-    // 过滤逻辑：SID 匹配 → 整组保留；否则按行过滤用户信息
-    let filteredDm = a.dm;
-    let filteredGrps = Object.values(a.groups);
-    if (groupFilter) {
-      filteredDm = filteredDm.filter(d => groupFilter({ sid: d.sid }));
-      filteredGrps = filteredGrps.filter(g => groupFilter({ sid: g.sid }));
-    }
-
-    // 搜索过滤
-    if (q) {
-      // 私聊：SID 匹配则整组保留，否则按行过滤
-      filteredDm = filteredDm.map(d => {
-        if (sidMatches(d.sid)) return d; // SID 命中，保留全部
-        const matched = d.rows.filter(rowMatchesUser);
-        if (matched.length === 0) return null;
-        return { ...d, rows: matched };
-      }).filter(Boolean);
-
-      // 群聊同理
-      filteredGrps = filteredGrps.map(g => {
-        if (sidMatches(g.sid)) return g;
-        const matched = g.rows.filter(rowMatchesUser);
-        if (matched.length === 0) return null;
-        return { ...g, rows: matched };
-      }).filter(Boolean);
-    }
-
-    if (filteredDm.length === 0 && filteredGrps.length === 0) return;
-
-    const allDmRows = a.dm.reduce((s, d) => s + d.rows.length, 0);
-    const allGrpRows = Object.values(a.groups).reduce((s, g) => s + g.rows.length, 0);
-    const platTotal = allDmRows + allGrpRows;
-
-    html += `<div class="sec">${esc(plat)} <span class="data-stat">${platTotal} 条</span></div>`;
-
-    // --- 私聊 ---
-    if (filteredDm.length > 0) {
-      const dmTotal = filteredDm.reduce((s, d) => s + d.rows.length, 0);
-      if (isBrief) {
-        html += `<div class="card"><div class="card-t">\u25CB 私聊 <span class="data-stat">${dmTotal} 条 / ${filteredDm.length} 个会话</span></div>`;
-        html += '<div class="tbl-wrap"><table class="dt"><thead><tr><th>会话ID</th><th>用户数</th><th>好感范围</th></tr></thead><tbody>';
-        filteredDm.forEach(d => {
-          const favs = d.rows.map(r => r.favour);
-          const rng = Math.min(...favs) === Math.max(...favs) ? String(favs[0]) : `${Math.min(...favs)} ~ ${Math.max(...favs)}`;
-          html += `<tr><td class="sid-sub" style="font-size:0.8rem;" title="${esc(d.sid)}">${esc(shortSid(d.sid))}</td><td>${d.rows.length}</td><td>${rng}</td></tr>`;
-        });
-        html += '</tbody></table></div></div>';
-      } else {
-        html += `<div class="card"><div class="card-t">\u25CB 私聊 <span class="data-stat">${dmTotal} 条</span></div>`;
-        html += '<div class="tbl-wrap"><table class="dt"><thead><tr><th>会话ID</th><th>用户ID</th><th>用户名</th><th>好感度</th><th>关系</th><th>唯一</th><th>操作</th></tr></thead><tbody>';
-        filteredDm.forEach(d => {
-          d.rows.forEach(r => {
-            html += `<tr id="row-${r.id}">
-              <td class="sid-sub" style="font-size:0.78rem;" title="${esc(d.sid)}">${esc(shortSid(d.sid))}</td>
-              <td style="font-family:monospace;font-size:0.83rem;">${esc(r.user_id)}</td>
-              <td><span contenteditable="true" class="ed" data-id="${r.id}" data-field="username">${esc(r.username)}</span></td>
-              <td><input type="number" class="in-sm" value="${r.favour}" data-id="${r.id}" data-field="favour"></td>
-              <td><span contenteditable="true" class="ed" data-id="${r.id}" data-field="relationship">${esc(r.relationship)}</span></td>
-              <td style="text-align:center"><input type="checkbox" data-id="${r.id}" data-field="is_unique" ${r.is_unique ? 'checked' : ''}></td>
-              <td style="white-space:nowrap"><button class="btn-sm" data-act="save-row" data-id="${r.id}" title="保存">\u2713</button> <button class="btn-sm btn-del" data-act="del-row" data-id="${r.id}" title="删除">\u00D7</button></td>
-            </tr>`;
-          });
-        });
-        html += '</tbody></table></div></div>';
-      }
-    }
-
-    // --- 群聊 ---
-    filteredGrps.forEach(grp => {
-      if (isBrief) {
-        const favs = grp.rows.map(r => r.favour);
-        const rng = Math.min(...favs) === Math.max(...favs) ? String(favs[0]) : `${Math.min(...favs)} ~ ${Math.max(...favs)}`;
-        html += `<div class="card" style="padding:12px 18px;">
-          <div style="display:flex;align-items:center;justify-content:space-between;">
-            <span>\u25A0 群 ${esc(grp.target)} <span class="data-stat">${grp.rows.length} 条 | ${rng}</span></span>
-            <button class="btn-sm" data-act="expand-grp" data-sid="${esc(grp.sid)}">展开 \u25B8</button>
-          </div>
-          <div class="sid-sub" title="${esc(grp.sid)}">${esc(shortSid(grp.sid))}</div>
-        </div>`;
-      } else {
-        html += `<div class="grp-section" data-sid="${esc(grp.sid)}">
-          <div class="grp-header open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-            <span class="grp-arrow">\u25B6</span>
-            <span style="flex:1">\u25A0 群 ${esc(grp.target)}</span>
-            <span class="data-stat">${grp.rows.length} 条</span>
-          </div>
-          <div class="tbl-wrap">
-            <table class="dt"><thead><tr><th>用户ID</th><th>用户名</th><th>好感度</th><th>关系</th><th>唯一</th><th>操作</th></tr></thead><tbody>`;
-        grp.rows.forEach(r => { html += renderRecordRow(r); });
-        html += '</tbody></table></div></div>';
-      }
-    });
-  });
-
-  if (platKeys.length === 0 || (platKeys.every(p => {
-    const a = adapters[p];
-    return a.dm.length === 0 && Object.keys(a.groups).length === 0;
-  }))) {
-    html += '<p class="dim">暂无非全局数据</p>';
-  }
-
-  // ---- 全局数据 ----
-  html += '<div class="sec" style="margin-top:20px">全局数据 <span class="data-stat">' + gl.length + ' 条</span></div>';
-
-  // 全局数据搜索过滤
-  let filteredGl = gl;
-  if (q) {
-    filteredGl = gl.filter(rowMatchesUser);
-  }
-
-  if (filteredGl.length === 0) {
-    html += '<p class="dim">' + (q ? '无匹配' : '暂无数据') + '</p>';
-  } else if (isBrief) {
-    const favours = filteredGl.map(r => r.favour);
-    const fMin = Math.min(...favours);
-    const fMax = Math.max(...favours);
-    const fRange = fMin === fMax ? String(fMin) : `${fMin} ~ ${fMax}`;
-
-    html += '<div class="tbl-wrap"><table class="dt"><thead><tr>' +
-      '<th>范围</th><th>用户数</th><th>好感范围</th><th>操作</th>' +
-      '</tr></thead><tbody>' +
-      `<tr><td><span class="tag-global">全局</span></td><td>${filteredGl.length}</td><td>${fRange}</td>` +
-      `<td><button class="btn-sm" data-act="expand-global">展开 \u25B8</button></td></tr>` +
-      '</tbody></table></div>';
-  } else {
-    html += '<div class="tbl-wrap"><table class="dt"><thead><tr><th>用户ID</th><th>用户名</th><th>好感度</th><th>关系</th><th>唯一</th><th>操作</th></tr></thead><tbody>';
-    filteredGl.forEach(r => {
-      html += renderRecordRow(r);
-    });
-    html += '</tbody></table></div>';
-  }
-
-  panel.innerHTML = html;
-  bindDataActions();
-}
-
-// 单条记录行 HTML
-function renderRecordRow(r) {
-  return `<tr id="row-${r.id}">
-    <td style="font-family:monospace;font-size:0.83rem;">${esc(r.user_id)}</td>
-    <td><span contenteditable="true" class="ed" data-id="${r.id}" data-field="username">${esc(r.username)}</span></td>
-    <td><input type="number" class="in-sm" value="${r.favour}" data-id="${r.id}" data-field="favour"></td>
-    <td><span contenteditable="true" class="ed" data-id="${r.id}" data-field="relationship">${esc(r.relationship)}</span></td>
-    <td style="text-align:center"><input type="checkbox" data-id="${r.id}" data-field="is_unique" ${r.is_unique ? 'checked' : ''}></td>
-    <td style="white-space:nowrap"><button class="btn-sm" data-act="save-row" data-id="${r.id}" title="保存">\u2713</button> <button class="btn-sm btn-del" data-act="del-row" data-id="${r.id}" title="删除">\u00D7</button></td>
-  </tr>`;
-}
-
-function bindDataActions() {
-  // 保存行
-  $$('#data-panel [data-act="save-row"]').forEach(btn => {
-    btn.onclick = async () => {
-      const id = +btn.dataset.id;
-      const row = document.getElementById('row-' + id);
-      if (!row) return;
-      const updates = { action: 'update', id };
-      const inp = row.querySelector('input[data-field="favour"]');
-      if (inp) updates.favour = parseInt(inp.value) || 0;
-      const cb = row.querySelector('input[data-field="is_unique"]');
-      if (cb) updates.is_unique = cb.checked;
-      row.querySelectorAll('.ed').forEach(el => {
-        updates[el.dataset.field] = el.textContent.trim();
+  // 添加私聊同级折叠卡片
+  if (_dataFilterType === 'all' || _dataFilterType === 'private') {
+    Object.keys(dmMapsByPlatform).sort().forEach((plat) => {
+      const dmRows = dmMapsByPlatform[plat];
+      folders.push({
+        key: `folder_dm_${plat}`,
+        type: 'private',
+        title: `${plat} · 私聊会话汇总`,
+        subtitle: `包含 ${new Set(dmRows.map((r) => r.session_id)).size} 个私聊会话`,
+        platform: plat,
+        rows: dmRows
       });
-      try {
-        const json = await bridge.apiPost('datarecords', updates);
-        if (json.success) { toast('数据已保存', 'ok'); }
-        else { toast('数据保存失败: ' + (json.error || ''), 'err'); }
-      } catch (e) { toast('请求失败: ' + e.message, 'err'); }
+    });
+  }
+
+  // 添加单个群聊同级折叠卡片
+  if (_dataFilterType === 'all' || _dataFilterType === 'group') {
+    Object.values(groupMaps).sort((a, b) => a.sid.localeCompare(b.sid)).forEach((g) => {
+      folders.push({
+        key: `folder_grp_${g.sid}`,
+        type: 'group',
+        title: `群聊：${g.target}`,
+        subtitle: g.sid,
+        platform: g.platform,
+        rows: g.rows
+      });
+    });
+  }
+
+  // 搜索词过滤逻辑
+  const query = _dataSearchQuery;
+  const filteredFolders = folders.map((f) => {
+    let matchedRows = f.rows;
+    if (query) {
+      matchedRows = f.rows.filter((r) => {
+        const text = [
+          r.user_id,
+          r.username,
+          r.relationship,
+          r.session_id,
+          r.platform,
+          r.session_target,
+          f.title
+        ].join(' ').toLowerCase();
+        return text.includes(query);
+      });
+    }
+    return {
+      ...f,
+      rows: sortRecords(matchedRows, _dataSortMode),
+      originalCount: f.rows.length
     };
+  }).filter((f) => f.rows.length > 0);
+
+  if (!filteredFolders.length) {
+    view.innerHTML = `
+      <div class="bento-card" style="text-align:center;padding:40px;color:var(--text-muted)">
+        没有匹配的好感度记录
+      </div>
+    `;
+    return;
+  }
+
+  let html = `<div class="data-folders-list">`;
+
+  filteredFolders.forEach((f) => {
+    const isSearching = Boolean(query);
+    const isOpen = isSearching || _openFolderKeys.has(f.key);
+
+    const favs = f.rows.map((r) => r.favour);
+    const minF = Math.min(...favs);
+    const maxF = Math.max(...favs);
+    const favRange = minF === maxF ? `${minF}` : `${minF} ~ ${maxF}`;
+    const uniqueCount = f.rows.filter((r) => r.is_unique).length;
+
+    const iconSvg = f.type === 'group'
+      ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>`
+      : f.type === 'private'
+      ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`
+      : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>`;
+
+    html += `
+      <div class="folder-card ${isOpen ? 'open' : ''}" data-folder-key="${escapeHtml(f.key)}">
+        <div class="folder-header" data-act="toggle-folder" data-folder-key="${escapeHtml(f.key)}">
+          <div class="folder-title-group">
+            <svg class="folder-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            <div class="folder-icon-badge ${f.type}">
+              ${iconSvg}
+            </div>
+            <div>
+              <div class="folder-name" title="${escapeHtml(f.subtitle)}">${escapeHtml(f.title)}</div>
+            </div>
+          </div>
+
+          <div class="folder-meta-tags">
+            <span class="tag-platform">${escapeHtml(f.platform)}</span>
+            <span class="favour-badge neutral">${f.rows.length} 人</span>
+            <span class="favour-badge positive" title="好感度区间">${favRange}</span>
+            ${uniqueCount > 0 ? `<span class="tag-unique-pill">★ 唯一:${uniqueCount}</span>` : ''}
+          </div>
+        </div>
+
+        <div class="folder-body">
+          <div class="table-responsive">
+            <table class="modern-table">
+              <thead>
+                <tr>
+                  <th>用户 ID (UID)</th>
+                  <th>用户昵称</th>
+                  <th>好感度数值</th>
+                  <th>关系称号</th>
+                  <th style="text-align:center">唯一关系</th>
+                  ${f.type === 'private' ? '<th>私聊会话 UMO</th>' : ''}
+                  <th style="text-align:right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+    `;
+
+    f.rows.forEach((r) => {
+      html += `
+        <tr id="rec-row-${r.id}">
+          <td style="font-family:ui-monospace,monospace;font-size:0.82rem;font-weight:600">${escapeHtml(r.user_id)}</td>
+          <td>
+            <span contenteditable="true" class="editable-chip" data-id="${r.id}" data-field="username" title="点击编辑昵称">
+              ${escapeHtml(r.username)}
+            </span>
+          </td>
+          <td>
+            <input type="number" class="form-input" style="width:78px;padding:4px 6px;text-align:center" 
+              value="${r.favour}" data-id="${r.id}" data-field="favour" title="直接修改好感度">
+          </td>
+          <td>
+            <span contenteditable="true" class="editable-chip" data-id="${r.id}" data-field="relationship" title="点击编辑关系">
+              ${escapeHtml(r.relationship)}
+            </span>
+          </td>
+          <td style="text-align:center">
+            <input type="checkbox" data-id="${r.id}" data-field="is_unique" ${r.is_unique ? 'checked' : ''} title="关系是否唯一">
+          </td>
+          ${f.type === 'private' ? `
+            <td style="font-family:ui-monospace,monospace;font-size:0.75rem;color:var(--text-dim)" title="${escapeHtml(r.session_id)}">
+              ${escapeHtml(r.session_id.split(':').slice(-1)[0] || r.session_id)}
+            </td>
+          ` : ''}
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn-outline" style="padding:4px 8px" data-act="save-single-rec" data-id="${r.id}" title="保存修改">
+              <svg style="width:13px;height:13px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+            </button>
+            <button class="btn-ghost-danger" style="padding:4px 8px" data-act="del-single-rec" data-id="${r.id}" title="删除记录">
+              <svg style="width:13px;height:13px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            </button>
+          </td>
+        </tr>
+      `;
+    });
+
+    html += `
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
   });
 
-  // 删除行（二次确认）
-  $$('#data-panel [data-act="del-row"]').forEach(btn => {
-    btn.onclick = async function () {
-      if (this.dataset.deleting === '1') {
-        const id = +this.dataset.id;
-        try {
-          const json = await bridge.apiPost('datarecords', { action: 'delete', id });
-          if (json.success) {
-            toast('数据已删除', 'ok');
-            // 从缓存中移除该记录，避免重新请求 API
-            if (_dataCache) {
-              _dataCache.global = (_dataCache.global || []).filter(r => r.id !== id);
-              _dataCache.non_global = (_dataCache.non_global || []).filter(r => r.id !== id);
-            }
-            renderDataFromCache();
-          } else { toast('删除失败', 'err'); }
-        } catch (e) { toast('请求失败: ' + e.message, 'err'); }
-      } else {
-        this.dataset.deleting = '1';
-        this.textContent = '\u2713 确认?';
-        this.style.color = '#fff';
-        this.style.background = 'var(--c-error)';
-        this.style.borderColor = 'var(--c-error)';
-        setTimeout(() => {
-          this.dataset.deleting = '0';
-          this.textContent = '\u00D7';
-          this.style.color = '';
-          this.style.background = '';
-          this.style.borderColor = '';
-        }, 3000);
+  html += `</div>`;
+  view.innerHTML = html;
+
+  // 绑定折叠切换
+  view.querySelectorAll('[data-act="toggle-folder"]').forEach((header) => {
+    header.onclick = () => {
+      const card = header.closest('.folder-card');
+      const key = header.dataset.folderKey;
+      if (card) {
+        card.classList.toggle('open');
+        if (card.classList.contains('open')) {
+          _openFolderKeys.add(key);
+        } else {
+          _openFolderKeys.delete(key);
+        }
       }
     };
   });
 
-  // 刷新按钮
-  const refreshBtn = document.querySelector('#data-panel [data-act="refresh-data"]');
-  if (refreshBtn) refreshBtn.onclick = () => { _dataCache = null; loadDataPanel(); };
+  bindDataRowActions();
+}
 
-  // 简略视图 "展开" 按钮：展开单个分组
-  $$('#data-panel [data-act="expand-grp"]').forEach(btn => {
-    btn.onclick = () => {
-      const sid = btn.dataset.sid;
-      _dataViewMode = 'detail';
-      updateViewModeUI();
-      renderDataFromCache(grp => grp.sid === sid);
-      // 渲染完后恢复过滤器，让用户能看到 "收起" 按钮恢复全部
+function bindDataRowActions() {
+  document.querySelectorAll('[data-act="save-single-rec"]').forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const id = +btn.dataset.id;
+      const row = document.getElementById('rec-row-' + id);
+      if (!row) return;
+
+      const updates = { action: 'update', id };
+      const favourInp = row.querySelector('input[data-field="favour"]');
+      if (favourInp) updates.favour = parseInt(favourInp.value) || 0;
+
+      const uniqueCb = row.querySelector('input[data-field="is_unique"]');
+      if (uniqueCb) updates.is_unique = uniqueCb.checked;
+
+      row.querySelectorAll('.editable-chip').forEach((chip) => {
+        updates[chip.dataset.field] = chip.textContent.trim();
+      });
+
+      try {
+        const res = await bridge.apiPost('datarecords', updates);
+        if (res.success) {
+          toast('记录已保存更新', 'ok');
+          if (_dataCache) {
+            const updater = (r) => {
+              if (r.id === id) {
+                if (updates.favour !== undefined) r.favour = updates.favour;
+                if (updates.username !== undefined) r.username = updates.username;
+                if (updates.relationship !== undefined) r.relationship = updates.relationship;
+                if (updates.is_unique !== undefined) r.is_unique = updates.is_unique;
+              }
+            };
+            (_dataCache.global || []).forEach(updater);
+            (_dataCache.non_global || []).forEach(updater);
+          }
+          updateDataStats();
+        } else {
+          toast('保存失败: ' + (res.error || ''), 'err');
+        }
+      } catch (err) {
+        toast('请求失败: ' + err.message, 'err');
+      }
     };
   });
 
-  // 简略视图 "展开全局" 按钮
-  const expandGlobal = document.querySelector('#data-panel [data-act="expand-global"]');
-  if (expandGlobal) {
-    expandGlobal.onclick = () => {
-      _dataViewMode = 'detail';
-      updateViewModeUI();
-      renderDataFromCache();
+  document.querySelectorAll('[data-act="del-single-rec"]').forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const id = +btn.dataset.id;
+      const confirmed = await showConfirmModal({
+        title: '删除好感度记录',
+        desc: `确定要删除该好感度记录 (#${id}) 吗？此操作无法撤销。`,
+        iconColor: 'rose'
+      });
+      if (!confirmed) return;
+
+      try {
+        const res = await bridge.apiPost('datarecords', { action: 'delete', id });
+        if (res.success) {
+          toast('记录已删除', 'ok');
+          if (_dataCache) {
+            _dataCache.global = (_dataCache.global || []).filter((r) => r.id !== id);
+            _dataCache.non_global = (_dataCache.non_global || []).filter((r) => r.id !== id);
+          }
+          renderDataRecords();
+          updateDataStats();
+        } else {
+          toast('删除失败: ' + (res.error || ''), 'err');
+        }
+      } catch (err) {
+        toast('请求失败: ' + err.message, 'err');
+      }
+    };
+  });
+}
+
+// ==================== 9. 迁移同步 Tab ====================
+
+let _syncPairs = [];
+let _sessionsList = [];
+
+function renderMigrateTab() {
+  const writeModeOptions = [
+    ['merge', 'Merge 合并（保留目标已有用户并覆盖相同）'],
+    ['replace', 'Replace 覆盖（清空目标会话后完整复制）']
+  ];
+
+  return `
+    <div class="bento-grid">
+      ${uiBentoCard({
+        title: '会话数据迁移与复制',
+        desc: '将源会话的用户好感数据复制或迁移到目标 UMO（例如换群或连通 WebChat）',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>',
+        content: `
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">源会话 UMO (Source)</label>
+              <input type="text" id="mig-src-umo" class="form-input" placeholder="例如 aiocqhttp:GroupMessage:123456">
+            </div>
+            <div class="form-group">
+              <label class="form-label">目标会话 UMO (Target)</label>
+              <input type="text" id="mig-tgt-umo" class="form-input" placeholder="例如 webchat:FriendMessage:session_abc">
+            </div>
+            <div class="form-group">
+              <label class="form-label">写入模式</label>
+              ${renderStandaloneCustomSelect({
+                id: 'mig-mode-select',
+                value: 'merge',
+                options: writeModeOptions
+              })}
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:10px;margin-top:14px;flex-wrap:wrap">
+            <button class="btn-outline" id="btn-mig-preview">
+              <svg style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <span>预览源会话</span>
+            </button>
+            <button class="btn-primary" id="btn-mig-copy">一键复制数据</button>
+            <button class="btn-danger" id="btn-mig-move">一键迁移 (清空源)</button>
+            <button class="btn-outline" id="btn-refresh-sessions">刷新可用会话</button>
+          </div>
+
+          <!-- 预览结果显示 -->
+          <div id="mig-preview-box" class="hidden" style="margin-top:14px;padding:12px;border-radius:var(--radius-md);background:var(--bg-subtle);font-size:0.8rem;max-height:160px;overflow:auto"></div>
+
+          <!-- 可用会话快速点选表 -->
+          <div class="section-banner" style="margin-top:20px;">
+            <div class="section-title"><div class="section-pill"></div> 活动会话快速拾取</div>
+          </div>
+          <div id="mig-sessions-table-wrap">
+            <div style="color:var(--text-dim);font-size:0.8rem">正在加载会话列表...</div>
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '双向完全同步对管理',
+        desc: '配置同步对后，两个会话的好感/关系变动将实时双向同步（如 QQ群 与 WebChat）',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>',
+        content: `
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">会话 A UMO</label>
+              <input type="text" id="sync-pair-a" class="form-input" placeholder="aiocqhttp:GroupMessage:123456">
+            </div>
+            <div class="form-group">
+              <label class="form-label">会话 B UMO</label>
+              <input type="text" id="sync-pair-b" class="form-input" placeholder="webchat:FriendMessage:abc">
+            </div>
+            <div class="form-group">
+              <label class="form-label">备注名称 (可选)</label>
+              <input type="text" id="sync-pair-note" class="form-input" placeholder="例如：主群与网页端同步">
+            </div>
+          </div>
+          <button class="btn-dashed-add" id="btn-add-sync-pair">+ 添加同步对</button>
+
+          <div class="section-banner" style="margin-top:20px;">
+            <div class="section-title"><div class="section-pill"></div> 已启用的同步对</div>
+          </div>
+          <div id="sync-pairs-list-wrap">
+            <div style="color:var(--text-dim);font-size:0.8rem">暂无同步对</div>
+          </div>
+        `
+      })}
+    </div>
+  `;
+}
+
+async function initMigrateTabLogic() {
+  const previewBtn = document.getElementById('btn-mig-preview');
+  const copyBtn = document.getElementById('btn-mig-copy');
+  const moveBtn = document.getElementById('btn-mig-move');
+  const refreshSessBtn = document.getElementById('btn-refresh-sessions');
+  const addSyncBtn = document.getElementById('btn-add-sync-pair');
+
+  if (previewBtn) {
+    previewBtn.onclick = async () => {
+      const source = (document.getElementById('mig-src-umo')?.value || '').trim();
+      if (!source) return toast('请先填写源会话 UMO', 'warn');
+
+      try {
+        const res = await bridge.apiPost('sessions', { action: 'preview', source });
+        const box = document.getElementById('mig-preview-box');
+        if (box) {
+          box.classList.remove('hidden');
+          const users = res.users || [];
+          box.innerHTML = users.length
+            ? `<strong>共 ${res.count} 条记录:</strong><br>` +
+              users.map((u) => `• ${escapeHtml(u.username || u.user_id)} (${escapeHtml(u.user_id)}) · 好感: ${u.favour} · 关系: ${escapeHtml(u.relationship || '无')}`).join('<br>')
+            : '源会话暂无记录';
+        }
+      } catch (err) {
+        toast('预览失败: ' + err.message, 'err');
+      }
     };
   }
-}
 
-// ===== Tab: 迁移同步 =====
-let _sessionList = [];
-let _syncPairs = [];
-let _syncHint = '';
-let _migrateSource = '';
-let _migrateTarget = '';
+  const executeSessionOp = async (action) => {
+    const source = (document.getElementById('mig-src-umo')?.value || '').trim();
+    const target = (document.getElementById('mig-tgt-umo')?.value || '').trim();
+    const mode = document.getElementById('mig-mode-select')?.querySelector('input[type="hidden"]')?.value || 'merge';
 
-function migrate() {
-  return `<div>
-    ${sec('会话迁移 / 复制')}
-    <p class="data-hint" style="margin-bottom:12px;">
-      将源会话用户的好感度、关系、用户ID 等复制到目标 UMO（仅会话ID不同）。用于群被封/换群/对接 WebChat。<br>
-      UMO 示例：<code>aiocqhttp:GroupMessage:123456</code> · <code>webchat:FriendMessage:&lt;session_id&gt;</code>
-    </p>
-    <div class="row">
-      <div class="field" style="flex:1">
-        <label>源会话 UMO</label>
-        <input type="text" id="mig-src" class="data-search" style="width:100%;font-family:monospace;font-size:0.82rem"
-          placeholder="源会话 UMO" value="${esc(_migrateSource)}">
-      </div>
-      <div class="field" style="flex:1">
-        <label>目标会话 UMO</label>
-        <input type="text" id="mig-tgt" class="data-search" style="width:100%;font-family:monospace;font-size:0.82rem"
-          placeholder="目标会话 UMO（可手写 webchat:...）" value="${esc(_migrateTarget)}">
-      </div>
-    </div>
-    <div class="row" style="align-items:center;gap:12px;margin-top:8px">
-      <label style="font-size:0.82rem;color:var(--c-text-dim)">模式
-        <select id="mig-mode">
-          <option value="merge">merge（合并覆盖）</option>
-          <option value="replace">replace（清空目标后复制）</option>
-        </select>
-      </label>
-      <button class="btn-sm" id="btn-mig-preview">预览源</button>
-      <button class="btn-sm btn-add" id="btn-mig-copy">一键复制</button>
-      <button class="btn-sm" id="btn-mig-migrate" style="background:var(--c-warning);color:#111">一键迁移</button>
-      <button class="btn-sm" id="btn-mig-refresh">\u21BB 刷新会话</button>
-    </div>
-    <div id="mig-session-list" class="tbl-wrap" style="max-height:220px;overflow:auto;margin-top:10px"></div>
-    <div id="mig-preview" class="dim" style="margin-top:10px;font-size:0.82rem;white-space:pre-wrap;max-height:160px;overflow:auto"></div>
-    <div id="mig-log" class="dim" style="margin-top:8px;font-size:0.82rem"></div>
+    if (!source || !target) return toast('源与目标 UMO 均不能为空', 'warn');
 
-    ${sec('完全同步（双向）')}
-    <p class="data-hint" style="margin-bottom:12px;">
-      配置后会话 A 的好感/关系变动实时同步到 B，反之亦然。支持 WebChat 与各平台 UMO。
-      <span id="mig-sync-hint"></span>
-    </p>
-    <div class="row">
-      <div class="field" style="flex:1">
-        <label>会话 A UMO</label>
-        <input type="text" id="sync-a" class="data-search" style="width:100%;font-family:monospace;font-size:0.82rem" placeholder="UMO A">
-      </div>
-      <div class="field" style="flex:1">
-        <label>会话 B UMO</label>
-        <input type="text" id="sync-b" class="data-search" style="width:100%;font-family:monospace;font-size:0.82rem" placeholder="UMO B">
-      </div>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <input type="text" id="sync-note" class="data-search" style="flex:1" placeholder="备注（可选）">
-      <button class="btn-sm btn-add" id="btn-sync-add">添加同步对</button>
-    </div>
-    <div id="mig-sync-pairs" style="margin-top:12px"></div>
-  </div>`;
-}
+    if (action === 'migrate') {
+      const confirmed = await showConfirmModal({
+        title: '确认迁移会话',
+        desc: `迁移操作会将源会话 (${source}) 的数据转移至目标会话，并清空源会话数据。确定继续吗？`,
+        iconColor: 'amber'
+      });
+      if (!confirmed) return;
+    }
 
-function initMigrateTab() {
-  const src = $('mig-src');
-  const tgt = $('mig-tgt');
-  if (src) src.oninput = () => { _migrateSource = src.value.trim(); };
-  if (tgt) tgt.oninput = () => { _migrateTarget = tgt.value.trim(); };
-
-  const setLog = (msg, err) => {
-    const el = $('mig-log');
-    if (!el) return;
-    el.textContent = msg;
-    el.style.color = err ? 'var(--c-error)' : 'var(--c-text-dim)';
-  };
-
-  const btnRefresh = $('btn-mig-refresh');
-  if (btnRefresh) btnRefresh.onclick = () => loadMigrateSessions();
-
-  const btnPreview = $('btn-mig-preview');
-  if (btnPreview) btnPreview.onclick = async () => {
     try {
-      const source = ($('mig-src')?.value || '').trim();
-      if (!source) return toast('请填写源 UMO', 'err');
-      const res = await bridge.apiPost('sessions', { action: 'preview', source });
-      const box = $('mig-preview');
-      const users = res.users || [];
-      if (box) {
-        box.textContent = users.length
-          ? users.map(u => `${u.username || u.user_id} (${u.user_id}) · 好感 ${u.favour} · 关系 ${u.relationship || '无'}`).join('\n')
-          : '源会话无记录';
-      }
-      setLog(`预览 ${source}：${res.count || 0} 条`);
-    } catch (e) { toast(e.message, 'err'); setLog(e.message, true); }
-  };
-
-  const doOp = async (action) => {
-    try {
-      const source = ($('mig-src')?.value || '').trim();
-      const target = ($('mig-tgt')?.value || '').trim();
-      const mode = $('mig-mode')?.value || 'merge';
-      if (!source || !target) return toast('请填写源和目标 UMO', 'err');
-      if (action === 'migrate' && !confirm('迁移会清空源会话数据，确认继续？')) return;
       const res = await bridge.apiPost('sessions', { action, source, target, mode });
-      setLog(res.message || JSON.stringify(res), !res.success);
-      toast(res.success ? (res.message || '完成') : (res.message || '失败'), res.success ? 'ok' : 'err');
-      if (res.success) loadMigrateSessions();
-    } catch (e) { toast(e.message, 'err'); setLog(e.message, true); }
+      if (res.success) {
+        toast(res.message || '操作成功完成', 'ok');
+        loadMigrateSessions();
+      } else {
+        toast('操作失败: ' + (res.error || res.message || ''), 'err');
+      }
+    } catch (err) {
+      toast('请求失败: ' + err.message, 'err');
+    }
   };
-  const btnCopy = $('btn-mig-copy');
-  if (btnCopy) btnCopy.onclick = () => doOp('copy');
-  const btnMig = $('btn-mig-migrate');
-  if (btnMig) btnMig.onclick = () => doOp('migrate');
 
-  const btnAdd = $('btn-sync-add');
-  if (btnAdd) btnAdd.onclick = async () => {
-    try {
-      const a = ($('sync-a')?.value || '').trim();
-      const b = ($('sync-b')?.value || '').trim();
-      const note = ($('sync-note')?.value || '').trim();
-      const res = await bridge.apiPost('session_sync', { action: 'add', a, b, note, enabled: true });
-      _syncPairs = res.pairs || [];
-      toast('同步对已添加', 'ok');
-      renderSyncPairs();
-    } catch (e) { toast(e.message, 'err'); setLog(e.message, true); }
-  };
+  if (copyBtn) copyBtn.onclick = () => executeSessionOp('copy');
+  if (moveBtn) moveBtn.onclick = () => executeSessionOp('migrate');
+  if (refreshSessBtn) refreshSessBtn.onclick = () => loadMigrateSessions();
+
+  if (addSyncBtn) {
+    addSyncBtn.onclick = async () => {
+      const a = (document.getElementById('sync-pair-a')?.value || '').trim();
+      const b = (document.getElementById('sync-pair-b')?.value || '').trim();
+      const note = (document.getElementById('sync-pair-note')?.value || '').trim();
+
+      if (!a || !b) return toast('请填写双方 UMO', 'warn');
+      if (a === b) return toast('双方 UMO 不能相同', 'warn');
+
+      try {
+        const res = await bridge.apiPost('session_sync', { action: 'add', a, b, note, enabled: true });
+        if (res.success) {
+          toast('同步对已添加', 'ok');
+          _syncPairs = res.pairs || [];
+          renderSyncPairs();
+        } else {
+          toast('添加失败: ' + (res.error || ''), 'err');
+        }
+      } catch (err) {
+        toast('请求失败: ' + err.message, 'err');
+      }
+    };
+  }
 
   loadMigrateSessions();
   loadSyncPairs();
 }
 
 async function loadMigrateSessions() {
-  const box = $('mig-session-list');
-  if (!box) return;
+  const wrap = document.getElementById('mig-sessions-table-wrap');
+  if (!wrap) return;
+
   try {
-    box.innerHTML = '<div class="dim">加载会话列表...</div>';
     const res = await bridge.apiGet('sessions');
-    _sessionList = res.sessions || [];
-    if (!_sessionList.length) {
-      box.innerHTML = '<p class="dim">暂无会话数据</p>';
+    _sessionsList = res.sessions || [];
+    if (!_sessionsList.length) {
+      wrap.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem">暂无活动会话</div>';
       return;
     }
-    let html = '<table class="dt"><thead><tr><th>会话 UMO</th><th>记录数</th><th>操作</th></tr></thead><tbody>';
-    _sessionList.forEach(s => {
-      html += `<tr>
-        <td style="font-family:monospace;font-size:0.78rem;word-break:break-all">${esc(s.session_id)}</td>
-        <td>${s.count}</td>
-        <td style="white-space:nowrap">
-          <button class="btn-sm" data-act="pick-src" data-sid="${esc(s.session_id)}">作源</button>
-          <button class="btn-sm" data-act="pick-tgt" data-sid="${esc(s.session_id)}">作目标</button>
-        </td>
-      </tr>`;
+
+    let html = `
+      <div class="table-responsive">
+        <table class="modern-table">
+          <thead>
+            <tr>
+              <th>会话 UMO</th>
+              <th>记录总数</th>
+              <th style="text-align:right">一键填入</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+
+    _sessionsList.forEach((s) => {
+      html += `
+        <tr>
+          <td style="font-family:ui-monospace,monospace;font-size:0.8rem">${escapeHtml(s.session_id)}</td>
+          <td><span class="favour-badge neutral">${s.count} 条</span></td>
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn-outline" style="padding:3px 8px;font-size:0.75rem" data-act="pick-src-umo" data-sid="${escapeHtml(s.session_id)}">设为源</button>
+            <button class="btn-outline" style="padding:3px 8px;font-size:0.75rem" data-act="pick-tgt-umo" data-sid="${escapeHtml(s.session_id)}">设为目标</button>
+          </td>
+        </tr>
+      `;
     });
-    html += '</tbody></table>';
-    box.innerHTML = html;
-    $$('#mig-session-list [data-act="pick-src"]').forEach(btn => {
+
+    html += '</tbody></table></div>';
+    wrap.innerHTML = html;
+
+    wrap.querySelectorAll('[data-act="pick-src-umo"]').forEach((btn) => {
       btn.onclick = () => {
-        _migrateSource = btn.dataset.sid;
-        const el = $('mig-src');
-        if (el) el.value = _migrateSource;
+        const inp = document.getElementById('mig-src-umo');
+        if (inp) inp.value = btn.dataset.sid;
       };
     });
-    $$('#mig-session-list [data-act="pick-tgt"]').forEach(btn => {
+
+    wrap.querySelectorAll('[data-act="pick-tgt-umo"]').forEach((btn) => {
       btn.onclick = () => {
-        _migrateTarget = btn.dataset.sid;
-        const el = $('mig-tgt');
-        if (el) el.value = _migrateTarget;
+        const inp = document.getElementById('mig-tgt-umo');
+        if (inp) inp.value = btn.dataset.sid;
       };
     });
-  } catch (e) {
-    box.innerHTML = '<p class="dim" style="color:var(--c-error)">加载失败: ' + esc(e.message) + '</p>';
+  } catch (err) {
+    wrap.innerHTML = `<div style="color:var(--accent-rose);font-size:0.8rem">加载会话失败: ${escapeHtml(err.message)}</div>`;
   }
 }
 
@@ -805,269 +1667,564 @@ async function loadSyncPairs() {
   try {
     const res = await bridge.apiGet('session_sync');
     _syncPairs = res.pairs || [];
-    _syncHint = res.hint || '';
-    const hintEl = $('mig-sync-hint');
-    if (hintEl && _syncHint) hintEl.textContent = ' ' + _syncHint.replace(/\n/g, ' ');
     renderSyncPairs();
-  } catch (e) {
-    const box = $('mig-sync-pairs');
-    if (box) box.innerHTML = '<p class="dim" style="color:var(--c-error)">' + esc(e.message) + '</p>';
+  } catch (err) {
+    console.error('加载同步对失败:', err);
   }
 }
 
 function renderSyncPairs() {
-  const box = $('mig-sync-pairs');
-  if (!box) return;
+  const wrap = document.getElementById('sync-pairs-list-wrap');
+  if (!wrap) return;
+
   if (!_syncPairs.length) {
-    box.innerHTML = '<p class="dim">暂无同步对</p>';
+    wrap.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem">暂无同步对</div>';
     return;
   }
+
   let html = '';
-  _syncPairs.forEach((p, i) => {
-    html += `<div style="border:1px solid var(--c-border);border-radius:8px;padding:10px;margin-bottom:8px;font-size:0.82rem">
-      <div style="font-family:monospace;word-break:break-all">A: ${esc(p.a)}</div>
-      <div style="font-family:monospace;word-break:break-all;margin:4px 0">B: ${esc(p.b)}</div>
-      <div class="dim">${p.enabled === false ? '已禁用' : '启用中'}${p.note ? ' · ' + esc(p.note) : ''}</div>
-      <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
-        <button class="btn-sm" data-act="sync-toggle" data-i="${i}">${p.enabled === false ? '启用' : '禁用'}</button>
-        <button class="btn-sm btn-add" data-act="sync-a2b" data-i="${i}">立即 A\u2192B</button>
-        <button class="btn-sm btn-add" data-act="sync-b2a" data-i="${i}">立即 B\u2192A</button>
-        <button class="btn-sm btn-add" data-act="sync-both" data-i="${i}">双向 merge</button>
-        <button class="btn-sm" data-act="sync-del" data-i="${i}" style="color:var(--c-error)">删除</button>
+  _syncPairs.forEach((p, idx) => {
+    html += `
+      <div class="sync-card-item">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div style="font-weight:600;font-size:0.85rem">
+            ${escapeHtml(p.note || `同步对 #${idx + 1}`)}
+            <span class="favour-badge ${p.enabled !== false ? 'positive' : 'negative'}" style="margin-left:8px">
+              ${p.enabled !== false ? '已启用' : '已禁用'}
+            </span>
+          </div>
+          <button class="btn-ghost-danger" data-act="del-sync-pair" data-idx="${idx}" title="删除同步对">&times;</button>
+        </div>
+
+        <div class="sync-pair-visual">
+          <span class="sync-umo-tag">${escapeHtml(p.a)}</span>
+          <svg class="sync-arrow-icon" style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
+          <span class="sync-umo-tag">${escapeHtml(p.b)}</span>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="btn-outline" data-act="toggle-sync-pair" data-idx="${idx}">
+            ${p.enabled !== false ? '禁用' : '启用'}
+          </button>
+          <button class="btn-outline" data-act="manual-sync" data-idx="${idx}" data-dir="a_to_b">立即 A &rarr; B</button>
+          <button class="btn-outline" data-act="manual-sync" data-idx="${idx}" data-dir="b_to_a">立即 B &rarr; A</button>
+          <button class="btn-primary" style="padding:6px 12px;font-size:0.8rem" data-act="manual-sync" data-idx="${idx}" data-dir="both">双向同步</button>
+        </div>
       </div>
-    </div>`;
+    `;
   });
-  box.innerHTML = html;
 
-  const setLog = (msg, err) => {
-    const el = $('mig-log');
-    if (!el) return;
-    el.textContent = msg;
-    el.style.color = err ? 'var(--c-error)' : 'var(--c-text-dim)';
-  };
+  wrap.innerHTML = html;
 
-  $$('#mig-sync-pairs [data-act]').forEach(btn => {
+  wrap.querySelectorAll('[data-act="del-sync-pair"]').forEach((btn) => {
     btn.onclick = async () => {
-      const act = btn.dataset.act;
-      const i = +btn.dataset.i;
+      const idx = +btn.dataset.idx;
+      const confirmed = await showConfirmModal({
+        title: '删除同步对',
+        desc: '确定要删除此同步对吗？',
+        iconColor: 'rose'
+      });
+      if (!confirmed) return;
+
       try {
-        if (act === 'sync-toggle') {
-          const res = await bridge.apiPost('session_sync', { action: 'toggle', index: i });
-          _syncPairs = res.pairs || [];
-          renderSyncPairs();
-        } else if (act === 'sync-del') {
-          if (!confirm('删除该同步对？')) return;
-          const res = await bridge.apiPost('session_sync', { action: 'remove', index: i });
-          _syncPairs = res.pairs || [];
-          renderSyncPairs();
-        } else if (act === 'sync-a2b' || act === 'sync-b2a' || act === 'sync-both') {
-          const p = _syncPairs[i];
-          if (!p) return;
-          const direction = act === 'sync-a2b' ? 'a_to_b' : act === 'sync-b2a' ? 'b_to_a' : 'both';
-          const res = await bridge.apiPost('session_sync', { action: 'sync_now', a: p.a, b: p.b, direction });
-          setLog(JSON.stringify(res.results || res, null, 2), !res.success);
-          toast(res.success ? '同步完成' : '同步部分失败', res.success ? 'ok' : 'err');
+        const res = await bridge.apiPost('session_sync', { action: 'remove', index: idx });
+        _syncPairs = res.pairs || [];
+        renderSyncPairs();
+        toast('同步对已删除', 'ok');
+      } catch (err) {
+        toast('删除失败: ' + err.message, 'err');
+      }
+    };
+  });
+
+  wrap.querySelectorAll('[data-act="toggle-sync-pair"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const idx = +btn.dataset.idx;
+      try {
+        const res = await bridge.apiPost('session_sync', { action: 'toggle', index: idx });
+        _syncPairs = res.pairs || [];
+        renderSyncPairs();
+      } catch (err) {
+        toast('切换状态失败: ' + err.message, 'err');
+      }
+    };
+  });
+
+  wrap.querySelectorAll('[data-act="manual-sync"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const idx = +btn.dataset.idx;
+      const dir = btn.dataset.dir;
+      const pair = _syncPairs[idx];
+      if (!pair) return;
+
+      try {
+        toast('正在执行同步...', 'ok');
+        const res = await bridge.apiPost('session_sync', {
+          action: 'sync_now',
+          a: pair.a,
+          b: pair.b,
+          direction: dir
+        });
+        if (res.success) {
+          toast('同步已成功执行', 'ok');
           loadMigrateSessions();
+        } else {
+          toast('同步部分或全部失败', 'warn');
         }
-      } catch (e) { toast(e.message, 'err'); setLog(e.message, true); }
+      } catch (err) {
+        toast('同步请求失败: ' + err.message, 'err');
+      }
     };
   });
 }
 
-// ===== Tab: 备份管理 =====
-function backup() {
-  return `<div>
-    ${sec('备份管理')}
-    <div class="row">
-      ${chk('backup.enabled', '启用自动备份', '周期性自动备份好感度数据')}
+// ==================== 10. 备份快照 Tab ====================
+
+function renderBackupTab() {
+  return `
+    <div class="bento-grid">
+      ${uiBentoCard({
+        title: '自动备份调度与轮转',
+        desc: '定期创建好感度数据库快照，并在过期后自动清理',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
+        content: `
+          <div class="form-row">
+            ${uiSwitch({
+              path: 'backup.enabled',
+              label: '启用自动备份',
+              desc: '按指定时间间隔自动创建本地快照'
+            })}
+            ${uiNumber({ path: 'backup.interval_hours', label: '备份间隔 (小时)', hint: '默认 3 小时' })}
+            ${uiNumber({ path: 'backup.retention_hours', label: '保留时间 (小时)', hint: '默认 24 小时' })}
+          </div>
+          <div style="font-size:0.75rem;color:var(--text-muted);margin-top:10px;">
+            提示：修改上述自动备份周期设置后，请点击顶部「保存配置」按钮持久化。
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '快照归档历史',
+        desc: '查看已有备份，支持一键恢复与手动快照',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>',
+        content: `
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+            <button class="btn-primary" id="btn-create-backup-now">
+              <svg style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+              <span>立即创建备份快照</span>
+            </button>
+            <button class="btn-outline" id="btn-refresh-backups">刷新备份列表</button>
+          </div>
+          <div id="backups-list-view">
+            <div style="color:var(--text-dim);font-size:0.8rem">正在加载快照列表...</div>
+          </div>
+        `
+      })}
     </div>
-    <div class="row">
-      ${num2('backup.interval_hours', '备份间隔（小时）', '默认 3')}
-      ${num2('backup.retention_hours', '数据留存（小时）', '默认 24')}
-    </div>
-    <p style="font-size:0.78rem;color:var(--c-text-dim);margin-bottom:16px;">修改备份配置后需点击顶部「保存」按钮生效</p>
-    <div class="data-toolbar" style="margin-bottom:12px;">
-      <div></div>
-      <div class="data-toolbar-right">
-        <button class="btn-sm btn-add" id="btn-backup-now">\u25B6 立即备份</button>
-        <button class="btn-sm" id="btn-backup-refresh">\u21BB 刷新列表</button>
-      </div>
-    </div>
-    <div id="backup-panel"><div class="dim">加载中...</div></div>
-  </div>`;
+  `;
 }
 
-function initBackupTab() {
-  const backupNow = $('btn-backup-now');
-  const backupRefresh = $('btn-backup-refresh');
-  if (backupNow) backupNow.onclick = async () => {
-    try {
-      status('备份中...', 'warn');
-      const r = await bridge.apiPost('backups', { action: 'backup_now' });
-      if (r.success) { status('备份完成', 'ok'); loadBackupList(); }
-      else { status('备份失败: ' + (r.error || ''), 'err'); }
-    } catch (e) { status('请求失败: ' + e.message, 'err'); }
-  };
-  if (backupRefresh) backupRefresh.onclick = () => loadBackupList();
-  loadBackupList();
+async function initBackupTabLogic() {
+  const createBtn = document.getElementById('btn-create-backup-now');
+  const refreshBtn = document.getElementById('btn-refresh-backups');
+
+  if (createBtn) {
+    createBtn.onclick = async () => {
+      try {
+        toast('正在创建备份...', 'ok');
+        const res = await bridge.apiPost('backups', { action: 'backup_now' });
+        if (res.success) {
+          toast('快照创建成功', 'ok');
+          loadBackupsList();
+        } else {
+          toast('备份失败: ' + (res.error || ''), 'err');
+        }
+      } catch (err) {
+        toast('创建备份失败: ' + err.message, 'err');
+      }
+    };
+  }
+
+  if (refreshBtn) {
+    refreshBtn.onclick = () => loadBackupsList();
+  }
+
+  loadBackupsList();
 }
 
-async function loadBackupList() {
-  const panel = $('backup-panel');
-  if (!panel) return;
+async function loadBackupsList() {
+  const view = document.getElementById('backups-list-view');
+  if (!view) return;
+
   try {
-    panel.innerHTML = '<div class="dim">加载中...</div>';
     const data = await bridge.apiGet('backups');
     const list = data.backups || [];
 
-    if (list.length === 0) {
-      panel.innerHTML = '<p class="dim">暂无备份文件</p>';
+    if (!list.length) {
+      view.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem;text-align:center;padding:20px;">暂无备份文件</div>';
       return;
     }
 
-    let html = '<div class="tbl-wrap"><table class="dt"><thead><tr><th>文件名</th><th>大小</th><th>操作</th></tr></thead><tbody>';
-    list.forEach(b => {
-      html += `<tr>
-        <td style="font-family:monospace;font-size:0.8rem;word-break:break-all;">${esc(b.filename)}</td>
-        <td style="white-space:nowrap;">${b.size_kb.toFixed(1)} KB</td>
-        <td style="white-space:nowrap;">
-          <button class="btn-sm" data-act="restore-backup" data-fn="${esc(b.filename)}" title="恢复此备份">\u21BA 恢复</button>
-          <button class="btn-sm btn-del" data-act="delete-backup" data-fn="${esc(b.filename)}" title="删除">\u00D7</button>
-        </td>
-      </tr>`;
+    let html = '';
+    list.forEach((b) => {
+      html += `
+        <div class="backup-item">
+          <div class="backup-file-info">
+            <div class="backup-icon-wrap">
+              <svg style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            </div>
+            <div>
+              <div class="backup-name">${escapeHtml(b.filename)}</div>
+              <div class="backup-meta">${b.size_kb.toFixed(1)} KB · 数据库快照</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <button class="btn-outline" data-act="restore-backup-file" data-fn="${escapeHtml(b.filename)}">
+              <svg style="width:13px;height:13px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+              <span>恢复此备份</span>
+            </button>
+            <button class="btn-ghost-danger" data-act="del-backup-file" data-fn="${escapeHtml(b.filename)}" title="删除此备份">&times;</button>
+          </div>
+        </div>
+      `;
     });
-    html += '</tbody></table></div>';
-    panel.innerHTML = html;
-    bindBackupActions();
-  } catch (e) {
-    panel.innerHTML = '<p class="dim" style="color:var(--c-error)">加载失败: ' + esc(e.message || String(e)) + '</p>';
+
+    view.innerHTML = html;
+
+    view.querySelectorAll('[data-act="restore-backup-file"]').forEach((btn) => {
+      btn.onclick = async () => {
+        const fn = btn.dataset.fn;
+        const confirmed = await showConfirmModal({
+          title: '确认恢复备份',
+          desc: `确定要使用快照 "${fn}" 恢复数据库吗？恢复将覆盖当前的好感度数据。`,
+          iconColor: 'amber'
+        });
+        if (!confirmed) return;
+
+        try {
+          toast('正在恢复快照...', 'ok');
+          const res = await bridge.apiPost('backups', { action: 'restore', filename: fn });
+          if (res.success) {
+            toast('快照已成功恢复: ' + (res.message || ''), 'ok');
+            _dataCache = null;
+          } else {
+            toast('恢复失败: ' + (res.error || res.message || ''), 'err');
+          }
+        } catch (err) {
+          toast('恢复请求失败: ' + err.message, 'err');
+        }
+      };
+    });
+
+    view.querySelectorAll('[data-act="del-backup-file"]').forEach((btn) => {
+      btn.onclick = async () => {
+        const fn = btn.dataset.fn;
+        const confirmed = await showConfirmModal({
+          title: '删除快照',
+          desc: `确定要永久删除快照 "${fn}" 吗？`,
+          iconColor: 'rose'
+        });
+        if (!confirmed) return;
+
+        try {
+          const res = await bridge.apiPost('backups', { action: 'delete', filename: fn });
+          if (res.success) {
+            toast('快照已删除', 'ok');
+            loadBackupsList();
+          } else {
+            toast('删除失败: ' + (res.error || res.message || ''), 'err');
+          }
+        } catch (err) {
+          toast('删除请求失败: ' + err.message, 'err');
+        }
+      };
+    });
+  } catch (err) {
+    view.innerHTML = `<div style="color:var(--accent-rose);font-size:0.8rem">加载备份失败: ${escapeHtml(err.message)}</div>`;
   }
 }
 
-function bindBackupActions() {
-  $$('#backup-panel [data-act="restore-backup"]').forEach(btn => {
-    btn.onclick = async function () {
-      if (this.dataset.confirming === '1') {
-        try {
-          status('恢复中...', 'warn');
-          const r = await bridge.apiPost('backups', { action: 'restore', filename: this.dataset.fn });
-          if (r.success) {
-            status('恢复成功: ' + (r.message || ''), 'ok');
-            _dataCache = null; // 清除数据缓存
-          } else { status('恢复失败: ' + (r.message || r.error || ''), 'err'); }
-        } catch (e) { status('请求失败: ' + e.message, 'err'); }
-        this.dataset.confirming = '0';
-        this.textContent = '\u21BA 恢复';
-        this.style.color = '';
-        this.style.background = '';
-        this.style.borderColor = '';
-      } else {
-        this.dataset.confirming = '1';
-        this.textContent = '\u2713 确认恢复?';
-        this.style.color = '#fff';
-        this.style.background = 'var(--c-warning)';
-        this.style.borderColor = 'var(--c-warning)';
-        setTimeout(() => {
-          this.dataset.confirming = '0';
-          this.textContent = '\u21BA 恢复';
-          this.style.color = '';
-          this.style.background = '';
-          this.style.borderColor = '';
-        }, 4000);
+// ==================== 表单事件绑定与数据收集 ====================
+
+function bindCustomSelects() {
+  document.querySelectorAll('[data-custom-select]').forEach((container) => {
+    const trigger = container.querySelector('.custom-select-trigger');
+    const hiddenInput = container.querySelector('input[type="hidden"]');
+    const valueDisplay = container.querySelector('.custom-select-value');
+    const options = container.querySelectorAll('.custom-select-option');
+
+    if (!trigger) return;
+
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      const wasOpen = container.classList.contains('open');
+      document.querySelectorAll('[data-custom-select].open').forEach((other) => {
+        if (other !== container) other.classList.remove('open');
+      });
+      container.classList.toggle('open', !wasOpen);
+    };
+
+    options.forEach((opt) => {
+      opt.onclick = (e) => {
+        e.stopPropagation();
+        const newVal = opt.dataset.val;
+        const text = opt.querySelector('.custom-select-option-text')?.textContent || '';
+
+        options.forEach((o) => o.classList.remove('selected'));
+        opt.classList.add('selected');
+
+        if (valueDisplay) valueDisplay.textContent = text;
+        if (hiddenInput) {
+          hiddenInput.value = newVal;
+          hiddenInput.dispatchEvent(new Event('input', { bubbles: true }));
+          hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        container.classList.remove('open');
+        markDirty(true);
+
+        const path = container.dataset.p;
+        if (path) {
+          let parsedVal = newVal;
+          if (newVal === 'true') parsedVal = true;
+          else if (newVal === 'false') parsedVal = false;
+          setVal(path, parsedVal);
+
+          // 衰减模式联动
+          if (path === 'favour_decay.mode') {
+            collectFormData();
+            renderTab('decay');
+          }
+        }
+
+        // 数据中心排序联动
+        if (container.id === 'data-sort-select') {
+          _dataSortMode = newVal;
+          renderDataRecords();
+        }
+      };
+    });
+  });
+}
+
+function bindTabEvents(tabKey) {
+  // 监听输入改动
+  document.querySelectorAll('#body input, #body textarea').forEach((el) => {
+    el.oninput = el.onchange = () => {
+      markDirty(true);
+      if (tabKey === 'levels') {
+        collectFormData();
+        updateLevelSpectrum();
       }
     };
   });
 
-  $$('#backup-panel [data-act="delete-backup"]').forEach(btn => {
-    btn.onclick = async function () {
-      if (this.dataset.deleting === '1') {
-        try {
-          const r = await bridge.apiPost('backups', { action: 'delete', filename: this.dataset.fn });
-          if (r.success) { status('已删除', 'ok'); loadBackupList(); }
-          else { status('删除失败: ' + (r.message || r.error || ''), 'err'); }
-        } catch (e) { status('请求失败: ' + e.message, 'err'); }
-      } else {
-        this.dataset.deleting = '1';
-        this.textContent = '\u2713 确认?';
-        this.style.color = '#fff';
-        this.style.background = 'var(--c-error)';
-        this.style.borderColor = 'var(--c-error)';
-        setTimeout(() => {
-          this.dataset.deleting = '0';
-          this.textContent = '\u00D7';
-          this.style.color = '';
-          this.style.background = '';
-          this.style.borderColor = '';
-        }, 3000);
+  // 占位符药丸插入事件
+  document.querySelectorAll('.pill-tag[data-insert]').forEach((pill) => {
+    pill.onclick = () => {
+      const code = pill.dataset.insert;
+      const textarea = pill.closest('.form-group')?.querySelector('textarea');
+      if (textarea) {
+        const start = textarea.selectionStart || textarea.value.length;
+        const end = textarea.selectionEnd || textarea.value.length;
+        const text = textarea.value;
+        textarea.value = text.substring(0, start) + code + text.substring(end);
+        textarea.focus();
+        textarea.selectionStart = textarea.selectionEnd = start + code.length;
+        markDirty(true);
+      }
+    };
+  });
+
+  // 动态操作按钮事件
+  document.querySelectorAll('[data-act]').forEach((btn) => {
+    btn.onclick = () => {
+      const act = btn.dataset.act;
+      collectFormData();
+
+      if (act === 'add-level-row') {
+        const levels = getVal('favour_levels', []);
+        const last = levels[levels.length - 1] || { max: -101 };
+        levels.push({
+          min: last.max + 1,
+          max: last.max + 50,
+          name: '等级 ' + (levels.length + 1),
+          desc: ''
+        });
+        markDirty(true);
+        renderTab('levels');
+      } else if (act === 'del-level-row') {
+        const idx = +btn.dataset.idx;
+        const levels = getVal('favour_levels', []);
+        levels.splice(idx, 1);
+        markDirty(true);
+        renderTab('levels');
+      } else if (act === 'add-adv-row') {
+        const rules = getVal('favour_decay.advanced_rules', []);
+        rules.push({ min_favour: 0, max_favour: 100, inactive_days: 7, decay_amount: 5, floor: null });
+        markDirty(true);
+        renderTab('decay');
+      } else if (act === 'del-adv-row') {
+        const idx = +btn.dataset.idx;
+        const rules = getVal('favour_decay.advanced_rules', []);
+        rules.splice(idx, 1);
+        markDirty(true);
+        renderTab('decay');
+      } else if (act === 'add-act-row') {
+        const rules = getVal('active_chat.rules', []);
+        rules.push({ min_favour: 0, max_favour: 100, probability: 5 });
+        markDirty(true);
+        renderTab('active');
+      } else if (act === 'del-act-row') {
+        const idx = +btn.dataset.idx;
+        const rules = getVal('active_chat.rules', []);
+        rules.splice(idx, 1);
+        markDirty(true);
+        renderTab('active');
+      } else if (act === 'add-list-item') {
+        const path = btn.dataset.path;
+        const list = getVal(path, []);
+        list.push('');
+        markDirty(true);
+        renderTab(currentTabName());
+      } else if (act === 'del-list-item') {
+        const path = btn.dataset.path;
+        const idx = +btn.dataset.idx;
+        const list = getVal(path, []);
+        list.splice(idx, 1);
+        markDirty(true);
+        renderTab(currentTabName());
       }
     };
   });
 }
 
-// ===== 收集表单数据 =====
-function collect() {
-  $$('[data-p]').forEach(el => {
-    const p = el.dataset.p;
-    if (el.type === 'checkbox') s(p, el.checked);
-    else if (el.type === 'number') { const v = el.value.trim(); s(p, v === '' ? null : parseFloat(v)); }
-    else if (el.tagName === 'SELECT') { const v = el.value.trim(); s(p, v === 'true' ? true : v === 'false' ? false : v); }
-    else s(p, el.value);
-  });
-
-  const lg = {};
-  $$('[data-list]').forEach(el => { const p = el.dataset.list; if (!lg[p]) lg[p] = []; lg[p].push(el.value); });
-  for (const [p, vs] of Object.entries(lg)) s(p, vs);
-
-  const tab = currentTab();
-  if (tab === 'levels') {
-    const lvs = [];
-    for (let i = 0; ; i++) {
-      const m = $('lv-min-' + i);
-      if (!m) break;
-      lvs.push({ min: +m.value || 0, max: +($('lv-max-' + i)?.value) || 0, name: $('lv-name-' + i)?.value || '', desc: $('lv-desc-' + i)?.value || '' });
+function collectFormData() {
+  document.querySelectorAll('[data-p]').forEach((el) => {
+    const path = el.dataset.p;
+    if (el.tagName === 'DIV' && el.hasAttribute('data-custom-select')) {
+      return;
     }
-    if (lvs.length) s('favour_levels', lvs);
+    if (el.type === 'checkbox') {
+      setVal(path, el.checked);
+    } else if (el.type === 'number') {
+      const valStr = el.value.trim();
+      setVal(path, valStr === '' ? null : parseFloat(valStr));
+    } else if (el.type === 'hidden' && el.closest('[data-custom-select]')) {
+      const val = el.value.trim();
+      if (val === 'true') setVal(path, true);
+      else if (val === 'false') setVal(path, false);
+      else setVal(path, val);
+    } else if (el.tagName === 'SELECT') {
+      const val = el.value.trim();
+      if (val === 'true') setVal(path, true);
+      else if (val === 'false') setVal(path, false);
+      else setVal(path, val);
+    } else {
+      setVal(path, el.value);
+    }
+  });
+
+  // 收集字符串数组
+  const listGroups = {};
+  document.querySelectorAll('[data-list-p]').forEach((el) => {
+    const path = el.dataset.listP;
+    if (!listGroups[path]) listGroups[path] = [];
+    listGroups[path].push(el.value.trim());
+  });
+  for (const [path, items] of Object.entries(listGroups)) {
+    setVal(path, items);
   }
-  if (tab === 'decay' && g('favour_decay.mode', 'linear') === 'advanced') {
+
+  const tab = currentTabName();
+  if (tab === 'levels') {
+    const levels = [];
+    for (let i = 0; ; i++) {
+      const minInp = document.getElementById('lv-min-' + i);
+      if (!minInp) break;
+      levels.push({
+        min: parseInt(minInp.value) || 0,
+        max: parseInt(document.getElementById('lv-max-' + i)?.value) || 0,
+        name: document.getElementById('lv-name-' + i)?.value || '',
+        desc: document.getElementById('lv-desc-' + i)?.value || '',
+      });
+    }
+    if (levels.length) setVal('favour_levels', levels);
+  } else if (tab === 'decay' && getVal('favour_decay.mode') === 'advanced') {
     const advs = [];
     for (let i = 0; ; i++) {
-      const m = $('adv-min-' + i);
-      if (!m) break;
-      const fl = $('adv-floor-' + i)?.value?.trim();
-      advs.push({ min_favour: +m.value || 0, max_favour: +($('adv-max-' + i)?.value) || 0, inactive_days: +($('adv-days-' + i)?.value) || 7, decay_amount: +($('adv-amt-' + i)?.value) || 5, floor: fl === '' ? null : (+fl || 0) });
+      const minInp = document.getElementById('adv-min-' + i);
+      if (!minInp) break;
+      const floorVal = document.getElementById('adv-floor-' + i)?.value?.trim();
+      advs.push({
+        min_favour: parseInt(minInp.value) || 0,
+        max_favour: parseInt(document.getElementById('adv-max-' + i)?.value) || 0,
+        inactive_days: parseInt(document.getElementById('adv-days-' + i)?.value) || 7,
+        decay_amount: parseInt(document.getElementById('adv-amt-' + i)?.value) || 5,
+        floor: floorVal === '' ? null : parseInt(floorVal) || 0,
+      });
     }
-    if (advs.length) s('favour_decay.advanced_rules', advs);
-  }
-  if (tab === 'active') {
+    if (advs.length) setVal('favour_decay.advanced_rules', advs);
+  } else if (tab === 'active') {
     const acts = [];
     for (let i = 0; ; i++) {
-      const m = $('act-min-' + i);
-      if (!m) break;
-      acts.push({ min_favour: +m.value || 0, max_favour: +($('act-max-' + i)?.value) || 0, probability: +($('act-prob-' + i)?.value) || 0 });
+      const minInp = document.getElementById('act-min-' + i);
+      if (!minInp) break;
+      acts.push({
+        min_favour: parseInt(minInp.value) || 0,
+        max_favour: parseInt(document.getElementById('act-max-' + i)?.value) || 0,
+        probability: parseInt(document.getElementById('act-prob-' + i)?.value) || 0,
+      });
     }
-    if (acts.length) s('active_chat.rules', acts);
+    if (acts.length) setVal('active_chat.rules', acts);
   }
 }
 
-// ===== 保存配置 =====
-async function save() {
+// ==================== 保存配置 ====================
+
+async function saveConfig() {
   try {
-    status('保存中...', 'warn');
-    collect();
-    const lvs = g('favour_levels', []);
-    if (lvs.length < 3) throw new Error('好感度分级至少需要3个');
-    // 范围重叠检测
-    const sorted = [...lvs].sort((a, b) => a.min - b.min);
+    setStatus('正在保存...', 'loading');
+    collectFormData();
+
+    // 校验分级规则
+    const levels = getVal('favour_levels', []);
+    if (levels.length < 3) {
+      throw new Error('好感度分级至少需要配置 3 个级别');
+    }
+
+    const sorted = [...levels].sort((a, b) => a.min - b.min);
     for (let i = 0; i < sorted.length - 1; i++) {
-      if (sorted[i].max >= sorted[i + 1].min) throw new Error(`分级范围重叠："${sorted[i].name}"(${sorted[i].min}~${sorted[i].max}) 与 "${sorted[i + 1].name}"(${sorted[i + 1].min}~${sorted[i + 1].max}) 存在重叠`);
+      if (sorted[i].max >= sorted[i + 1].min) {
+        throw new Error(`分级区间重叠："${sorted[i].name}" (${sorted[i].min}~${sorted[i].max}) 与 "${sorted[i + 1].name}" (${sorted[i + 1].min}~${sorted[i + 1].max})`);
+      }
     }
+
     for (let i = 0; i < sorted.length; i++) {
-      if (i >= 7 && (!sorted[i].desc || !sorted[i].desc.trim())) throw new Error(`第${i + 1}个分级"${sorted[i].name}"的描述为必填项`);
+      if (i >= 7 && (!sorted[i].desc || !sorted[i].desc.trim())) {
+        throw new Error(`第 ${i + 1} 个分级 "${sorted[i].name}" 的人设描述为必填项`);
+      }
     }
-    const r = await bridge.apiPost('config', config);
-    if (r.success) { original = deepClone(config); status('已连接', 'ok'); toast('配置已保存', 'ok'); }
-    else throw new Error(r.error || '保存失败');
-  } catch (e) { status('错误', 'err'); toast('保存失败: ' + e.message, 'err'); }
+
+    const res = await bridge.apiPost('config', config);
+    if (res.success) {
+      originalConfig = deepClone(config);
+      markDirty(false);
+      setStatus('已就绪', 'ok');
+      toast('配置已成功保存并热生效', 'ok');
+    } else {
+      throw new Error(res.error || '保存失败');
+    }
+  } catch (err) {
+    console.error('保存配置错误:', err);
+    setStatus('保存失败', 'err');
+    toast('保存失败: ' + err.message, 'err', 5000);
+  }
 }
 
+// ==================== 启动入口 ====================
+
+setupNavTabs();
 bridge.ready().then(() => init());

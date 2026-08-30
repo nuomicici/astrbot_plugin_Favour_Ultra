@@ -958,14 +958,31 @@ class FavourManagerTool(Star):
             "会话完全同步对管理"
         )
 
+    def _get_plugin_version(self) -> str:
+        """从 metadata.yaml 读取插件真实版本号。"""
+        try:
+            meta_path = Path(__file__).parent / "metadata.yaml"
+            if meta_path.exists():
+                text = meta_path.read_text(encoding="utf-8")
+                m = re.search(r"^\s*version\s*:\s*[\"']?([^\"'\r\n]+)", text, re.MULTILINE)
+                if m:
+                    return m.group(1).strip()
+        except Exception as e:
+            logger.debug(f"读取插件版本号失败: {e}")
+        return "v4.4.4"
+
     async def _api_get_config(self):
-        """GET /config → 返回当前完整配置"""
+        """GET /config → 返回当前完整配置与实际插件版本"""
         try:
             from quart import jsonify
-            return jsonify(self.config_mgr.config)
+            resp = dict(self.config_mgr.config)
+            resp["_plugin_version"] = self._get_plugin_version()
+            return jsonify(resp)
         except ImportError:
             import json as _json
-            return _json.dumps(self.config_mgr.config, ensure_ascii=False), 200, {"Content-Type": "application/json"}
+            resp = dict(self.config_mgr.config)
+            resp["_plugin_version"] = self._get_plugin_version()
+            return _json.dumps(resp, ensure_ascii=False), 200, {"Content-Type": "application/json"}
 
     async def _api_save_config(self):
         """POST /config → 验证并保存配置"""
@@ -975,6 +992,7 @@ class FavourManagerTool(Star):
             if not data or not isinstance(data, dict):
                 return jsonify({"success": False, "error": "无效的请求数据"}), 400
 
+            data.pop("_plugin_version", None)
             logger.debug(f"[配置保存] 收到 WebUI 配置保存请求，共 {len(data)} 个顶级字段。")
             success = self.config_mgr.update_from_webui(data)
             if not success:
