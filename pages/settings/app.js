@@ -3,10 +3,62 @@
  * 深度重构与美术升级 (全局定制下拉选单美化)
  */
 
-const bridge = window.AstrBotPluginPage;
+const PLUGIN_NAME = 'astrbot_plugin_Favour_Ultra';
 let config = {};
 let originalConfig = {};
 let isDirtyState = false;
+
+// ==================== Bridge 桥接与 API 请求封装 ====================
+
+function getBridge() {
+  return window.AstrBotPluginPage || null;
+}
+
+async function waitForBridge(timeoutMs = 3000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const b = getBridge();
+    if (b && typeof b.ready === 'function') {
+      try {
+        await b.ready();
+      } catch (e) {
+        console.warn('Bridge ready warning:', e);
+      }
+      return b;
+    }
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  return getBridge();
+}
+
+async function apiGet(endpoint, params = {}) {
+  const bridge = getBridge();
+  if (bridge && typeof bridge.apiGet === 'function') {
+    return await bridge.apiGet(endpoint, params);
+  }
+  // 降级 Fetch
+  const qs = new URLSearchParams(params).toString();
+  const url = `/${PLUGIN_NAME}/${endpoint}${qs ? '?' + qs : ''}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  return await res.json();
+}
+
+async function apiPost(endpoint, data = {}) {
+  const bridge = getBridge();
+  if (bridge && typeof bridge.apiPost === 'function') {
+    return await bridge.apiPost(endpoint, data);
+  }
+  // 降级 Fetch
+  const url = `/${PLUGIN_NAME}/${endpoint}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  return await res.json();
+}
 
 // ==================== 自定义弹窗 Modal 系统 ====================
 
@@ -98,13 +150,14 @@ function markDirty(dirty = true) {
 async function init() {
   try {
     setStatus('正在连接...', 'loading');
-    config = await bridge.apiGet('config');
+    config = await apiGet('config');
     originalConfig = deepClone(config);
 
     // 动态读取并展示插件真实版本号
     const verTag = document.getElementById('brand-version-tag');
     if (verTag) {
-      const ver = config._plugin_version || (bridge.context && bridge.context.version) || 'v4.4.4';
+      const bridge = getBridge();
+      const ver = config._plugin_version || (bridge && bridge.context && bridge.context.version) || 'v4.4.5';
       verTag.textContent = ver.startsWith('v') ? ver : 'v' + ver;
     }
 
@@ -1053,7 +1106,7 @@ async function loadDataRecords(force = false) {
   try {
     if (!_dataCache || force) {
       view.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">正在加载好感度记录...</div>';
-      _dataCache = await bridge.apiGet('datarecords');
+      _dataCache = await apiGet('datarecords');
     }
     updateDataStats();
     renderDataRecords();
@@ -1363,7 +1416,7 @@ function bindDataRowActions() {
       });
 
       try {
-        const res = await bridge.apiPost('datarecords', updates);
+        const res = await apiPost('datarecords', updates);
         if (res.success) {
           toast('记录已保存更新', 'ok');
           if (_dataCache) {
@@ -1400,7 +1453,7 @@ function bindDataRowActions() {
       if (!confirmed) return;
 
       try {
-        const res = await bridge.apiPost('datarecords', { action: 'delete', id });
+        const res = await apiPost('datarecords', { action: 'delete', id });
         if (res.success) {
           toast('记录已删除', 'ok');
           if (_dataCache) {
@@ -1527,7 +1580,7 @@ async function initMigrateTabLogic() {
       if (!source) return toast('请先填写源会话 UMO', 'warn');
 
       try {
-        const res = await bridge.apiPost('sessions', { action: 'preview', source });
+        const res = await apiPost('sessions', { action: 'preview', source });
         const box = document.getElementById('mig-preview-box');
         if (box) {
           box.classList.remove('hidden');
@@ -1560,7 +1613,7 @@ async function initMigrateTabLogic() {
     }
 
     try {
-      const res = await bridge.apiPost('sessions', { action, source, target, mode });
+      const res = await apiPost('sessions', { action, source, target, mode });
       if (res.success) {
         toast(res.message || '操作成功完成', 'ok');
         loadMigrateSessions();
@@ -1586,7 +1639,7 @@ async function initMigrateTabLogic() {
       if (a === b) return toast('双方 UMO 不能相同', 'warn');
 
       try {
-        const res = await bridge.apiPost('session_sync', { action: 'add', a, b, note, enabled: true });
+        const res = await apiPost('session_sync', { action: 'add', a, b, note, enabled: true });
         if (res.success) {
           toast('同步对已添加', 'ok');
           _syncPairs = res.pairs || [];
@@ -1609,7 +1662,7 @@ async function loadMigrateSessions() {
   if (!wrap) return;
 
   try {
-    const res = await bridge.apiGet('sessions');
+    const res = await apiGet('sessions');
     _sessionsList = res.sessions || [];
     if (!_sessionsList.length) {
       wrap.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem">暂无活动会话</div>';
@@ -1665,7 +1718,7 @@ async function loadMigrateSessions() {
 
 async function loadSyncPairs() {
   try {
-    const res = await bridge.apiGet('session_sync');
+    const res = await apiGet('session_sync');
     _syncPairs = res.pairs || [];
     renderSyncPairs();
   } catch (err) {
@@ -1727,7 +1780,7 @@ function renderSyncPairs() {
       if (!confirmed) return;
 
       try {
-        const res = await bridge.apiPost('session_sync', { action: 'remove', index: idx });
+        const res = await apiPost('session_sync', { action: 'remove', index: idx });
         _syncPairs = res.pairs || [];
         renderSyncPairs();
         toast('同步对已删除', 'ok');
@@ -1741,7 +1794,7 @@ function renderSyncPairs() {
     btn.onclick = async () => {
       const idx = +btn.dataset.idx;
       try {
-        const res = await bridge.apiPost('session_sync', { action: 'toggle', index: idx });
+        const res = await apiPost('session_sync', { action: 'toggle', index: idx });
         _syncPairs = res.pairs || [];
         renderSyncPairs();
       } catch (err) {
@@ -1759,7 +1812,7 @@ function renderSyncPairs() {
 
       try {
         toast('正在执行同步...', 'ok');
-        const res = await bridge.apiPost('session_sync', {
+        const res = await apiPost('session_sync', {
           action: 'sync_now',
           a: pair.a,
           b: pair.b,
@@ -1834,7 +1887,7 @@ async function initBackupTabLogic() {
     createBtn.onclick = async () => {
       try {
         toast('正在创建备份...', 'ok');
-        const res = await bridge.apiPost('backups', { action: 'backup_now' });
+        const res = await apiPost('backups', { action: 'backup_now' });
         if (res.success) {
           toast('快照创建成功', 'ok');
           loadBackupsList();
@@ -1859,7 +1912,7 @@ async function loadBackupsList() {
   if (!view) return;
 
   try {
-    const data = await bridge.apiGet('backups');
+    const data = await apiGet('backups');
     const list = data.backups || [];
 
     if (!list.length) {
@@ -1905,7 +1958,7 @@ async function loadBackupsList() {
 
         try {
           toast('正在恢复快照...', 'ok');
-          const res = await bridge.apiPost('backups', { action: 'restore', filename: fn });
+          const res = await apiPost('backups', { action: 'restore', filename: fn });
           if (res.success) {
             toast('快照已成功恢复: ' + (res.message || ''), 'ok');
             _dataCache = null;
@@ -1929,12 +1982,12 @@ async function loadBackupsList() {
         if (!confirmed) return;
 
         try {
-          const res = await bridge.apiPost('backups', { action: 'delete', filename: fn });
+          const res = await apiPost('backups', { action: 'delete', filename: fn });
           if (res.success) {
             toast('快照已删除', 'ok');
             loadBackupsList();
           } else {
-            toast('删除失败: ' + (res.error || res.message || ''), 'err');
+            toast('删除失败: ' + (res.error || ''), 'err');
           }
         } catch (err) {
           toast('删除请求失败: ' + err.message, 'err');
@@ -2208,7 +2261,7 @@ async function saveConfig() {
       }
     }
 
-    const res = await bridge.apiPost('config', config);
+    const res = await apiPost('config', config);
     if (res.success) {
       originalConfig = deepClone(config);
       markDirty(false);
@@ -2226,5 +2279,19 @@ async function saveConfig() {
 
 // ==================== 启动入口 ====================
 
-setupNavTabs();
-bridge.ready().then(() => init());
+async function startApp() {
+  setupNavTabs();
+  const bridge = await waitForBridge(3000);
+  if (bridge && typeof bridge.onContext === 'function') {
+    bridge.onContext((ctx) => {
+      // 监听主题或语言上下文
+    });
+  }
+  await init();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', startApp);
+} else {
+  startApp();
+}
