@@ -14,7 +14,7 @@ from sqlmodel import SQLModel, Field, select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError as SAOperationalError
+from sqlalchemy.exc import OperationalError as SAOperationalError, IntegrityError as SAIntegrityError
 from astrbot.api import logger
 from .utils import is_valid_userid
 
@@ -126,6 +126,22 @@ class FavourDBManager:
                             await conn.execute(text("ALTER TABLE favour_records ADD COLUMN username VARCHAR(128) DEFAULT ''"))
                             logger.info("数据库升级完成（username）。")
                             #################
+
+                        # 添加唯一索引防止重复行（修复 #26：并发 select-then-insert 可能撞出重复）
+                        result = await conn.execute(text(
+                            "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_user_session'"
+                        ))
+                        if result.scalar() is None:
+                            # 先清理可能已存在的重复行（保留 id 最大的那条）
+                            await conn.execute(text(
+                                "DELETE FROM favour_records WHERE id NOT IN ("
+                                "  SELECT MAX(id) FROM favour_records GROUP BY user_id, session_id"
+                                ")"
+                            ))
+                            await conn.execute(text(
+                                "CREATE UNIQUE INDEX uq_user_session ON favour_records(user_id, session_id)"
+                            ))
+                            logger.info("数据库升级完成（UNIQUE INDEX uq_user_session）。")
 
                 self._initialized = True
                 logger.info(f"好感度数据库已初始化: {self.db_path}")
@@ -245,7 +261,7 @@ class FavourDBManager:
         is_unique: Optional[bool] = None,
         touch_interaction: bool = True  # 是否刷新最后互动时间
     ) -> bool:
-        """更新好感度记录"""
+        """更新好感度记录（并发安全：唯一索引 + IntegrityError 回退更新）"""
         await self.init_db()
         if not is_valid_userid(user_id):
             return False
@@ -273,6 +289,30 @@ class FavourDBManager:
                         last_interaction=now
                     )
                     session.add(record)
+                    try:
+                        await session.commit()
+                    except SAIntegrityError:
+                        # 并发插入冲突：回滚后走更新路径
+                        await session.rollback()
+                        result = await session.execute(
+                            select(FavourRecord).where(
+                                FavourRecord.user_id == user_id,
+                                FavourRecord.session_id == sid
+                            )
+                        )
+                        record = result.scalars().first()
+                        if record:
+                            if favour is not None:
+                                record.favour = max(self.min_val, min(self.max_val, favour))
+                            if relationship is not None:
+                                record.relationship = relationship
+                            if is_unique is not None:
+                                record.is_unique = is_unique
+                            record.updated_at = now
+                            if touch_interaction:
+                                record.last_interaction = now
+                            session.add(record)
+                            await session.commit()
                 else:
                     if favour is not None:
                         record.favour = max(self.min_val, min(self.max_val, favour))
@@ -284,8 +324,8 @@ class FavourDBManager:
                     if touch_interaction:
                         record.last_interaction = now
                     session.add(record)
+                    await session.commit()
                 
-                await session.commit()
                 return True
         except Exception as e:
             logger.error(f"更新数据库失败: {str(e)}")
@@ -781,3 +821,88 @@ class FavourDBManager:
         full_msg = f"{msg}；已清空源会话 {source_sid}"
         logger.info(f"[会话迁移] {full_msg}")
         return True, full_msg, count
+
+    @_retry_on_locked()
+    async def auto_migrate_global_to_adapters(self) -> Tuple[int, int]:
+        """一次性将旧版 'global' 池中的记录自动迁移到各适配器前缀池。
+
+        迁移策略：
+          - 遍历 global 池中的每个 user_id
+          - 查找该 user_id 在非 'global' 的共享池（适配器前缀，session_id 不含 ':'）中是否已有记录
+          - 若已有：取好感度较高者保留（relationship / is_unique / created_at 取有值/较早者）
+          - 若没有适配器前缀记录：保留 global 记录不动（等首次交互时 _get_initial_favour 兜底继承）
+          - 迁移完成后删除已合并的 global 记录
+
+        Returns: (migrated_count, skipped_count)
+        """
+        await self.init_db()
+        migrated = 0
+        skipped = 0
+
+        try:
+            # 获取 global 池所有记录
+            global_records = await self.get_all_in_session("global")
+            if not global_records:
+                return 0, 0
+
+            # 获取所有适配器前缀池的记录（session_id 不含 ':' 且不是 'global'）
+            async with self.async_session() as session:
+                stmt = select(FavourRecord).where(
+                    FavourRecord.session_id.not_like('%:%'),
+                    FavourRecord.session_id != "global",
+                )
+                result = await session.execute(stmt)
+                adapter_records = list(result.scalars().all())
+
+            # 按 user_id 索引适配器前缀池记录：{user_id: [records]}
+            adapter_by_user: Dict[str, List[FavourRecord]] = {}
+            for rec in adapter_records:
+                adapter_by_user.setdefault(rec.user_id, []).append(rec)
+
+            now = datetime.now()
+            global_ids_to_delete: List[int] = []
+
+            async with self.async_session() as session:
+                for g_rec in global_records:
+                    user_adapter_recs = adapter_by_user.get(g_rec.user_id, [])
+                    if not user_adapter_recs:
+                        # 该用户在适配器池中无记录，保留 global 行供 _get_initial_favour 兜底
+                        skipped += 1
+                        continue
+
+                    # 有适配器前缀记录：合并到每个适配器池
+                    for a_rec in user_adapter_recs:
+                        # 取好感度较高者
+                        if g_rec.favour > a_rec.favour:
+                            stmt_upd = (
+                                update(FavourRecord)
+                                .where(FavourRecord.id == a_rec.id)
+                                .values(
+                                    favour=g_rec.favour,
+                                    relationship=g_rec.relationship if (g_rec.relationship and g_rec.relationship != "无") else a_rec.relationship,
+                                    is_unique=g_rec.is_unique or a_rec.is_unique,
+                                    created_at=min(g_rec.created_at or now, a_rec.created_at or now),
+                                    updated_at=now,
+                                )
+                            )
+                            await session.execute(stmt_upd)
+
+                    global_ids_to_delete.append(g_rec.id)
+                    migrated += 1
+
+                # 删除已合并的 global 记录
+                if global_ids_to_delete:
+                    await session.execute(
+                        delete(FavourRecord).where(FavourRecord.id.in_(global_ids_to_delete))
+                    )
+
+                await session.commit()
+
+            if migrated > 0:
+                logger.info(f"[全局迁移] 已将 {migrated} 条旧 'global' 记录合并到适配器前缀池，"
+                            f"跳过 {skipped} 条（无对应适配器池记录，保留供兜底继承）。")
+            return migrated, skipped
+
+        except Exception as e:
+            logger.error(f"[全局迁移] 自动迁移 global→适配器前缀 失败: {e}")
+            return 0, 0

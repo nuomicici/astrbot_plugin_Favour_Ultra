@@ -267,6 +267,12 @@ class FavourManagerTool(Star):
             if old_local.exists():
                 logger.info("检测到旧版会话好感度文件，开始迁移...")
                 await self.db_manager.migrate_from_json(old_local, is_global=False)
+
+            # 自动迁移旧 'global' 池到适配器前缀池（修复 #26）
+            if self.is_global_favour:
+                migrated, skipped = await self.db_manager.auto_migrate_global_to_adapters()
+                if migrated > 0:
+                    logger.info(f"[启动迁移] 旧 'global' 池 → 适配器前缀池：合并 {migrated} 条，保留 {skipped} 条待兜底。")
                 
         except Exception as e:
             logger.error(f"数据库初始化或迁移失败: {str(e)}\n{traceback.format_exc()}")
@@ -1717,18 +1723,20 @@ class FavourManagerTool(Star):
     async def _get_initial_favour(self, event: AstrMessageEvent) -> int:
         user_id = str(event.get_sender_id())
         
-        if not self.is_global_favour:
-            # 尝试从共享记录（旧版 "global" 或适配器前缀）获取初始好感度
-            global_rec = await self.db_manager.get_favour(user_id, "global")
-            if global_rec:
-                return max(self.min_favour_value, min(self.max_favour_value, global_rec.favour))
-            # 也尝试适配器前缀记录
-            origin = event.unified_msg_origin
-            if origin and ":" in origin:
-                adapter_prefix = origin.split(":")[0]
-                adapter_rec = await self.db_manager.get_favour(user_id, adapter_prefix)
-                if adapter_rec:
-                    return max(self.min_favour_value, min(self.max_favour_value, adapter_rec.favour))
+        # 无论全局/独立模式，都尝试从已有共享记录继承好感度
+        # 全局模式：当前 key 是适配器前缀，但旧版数据可能存在 "global" 下
+        # 独立模式：新会话可从共享池继承初始值
+        # 先查旧版 "global"
+        global_rec = await self.db_manager.get_favour(user_id, "global")
+        if global_rec:
+            return max(self.min_favour_value, min(self.max_favour_value, global_rec.favour))
+        # 再查适配器前缀记录（如 "aiocqhttp"）
+        origin = event.unified_msg_origin
+        if origin and ":" in origin:
+            adapter_prefix = origin.split(":")[0]
+            adapter_rec = await self.db_manager.get_favour(user_id, adapter_prefix)
+            if adapter_rec:
+                return max(self.min_favour_value, min(self.max_favour_value, adapter_rec.favour))
 
         is_envoy = str(user_id) in [str(e) for e in self.favour_envoys]
         is_admin = await self._check_permission(event, PermLevel.OWNER) 

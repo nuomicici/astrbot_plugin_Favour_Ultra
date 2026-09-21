@@ -13,6 +13,12 @@
 https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/releases/tag/v4.3.0
 
 ## 更新日志
+### v4.4.6 (2026-09-21)
+- **修复 `is_global_favour=true` 时旧 `global` 数据丢失问题**（[#26](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/26)）：
+  - **根因**：v4.2.2 起共享池 key 从固定 `global` 切换为适配器前缀（如 `aiocqhttp`），但旧数据未迁移，且 `_get_initial_favour` 的兜底条件 `if not self.is_global_favour` 写反，导致全局模式下新记录无法继承旧 `global` 好感度，升级后好感度静默归零
+  - **修复 1**：`_get_initial_favour` 不再受 `is_global_favour` 开关限制，全局模式与独立模式均可从旧 `global` 或适配器前缀记录继承初始好感度
+  - **修复 2**：启动时自动迁移——当 `is_global_favour=true` 时，一次性将旧 `global` 池中已有对应适配器前缀记录的用户合并（取好感度较高者，`relationship`/`is_unique`/`created_at` 取有值/较早者），合并后删除旧 `global` 行；无对应适配器池记录的保留供兜底继承
+  - **修复 3**：`favour_records` 表新增 `UNIQUE INDEX(user_id, session_id)`，杜绝并发 select-then-insert 撞出重复行；`update_favour` 新增 `IntegrityError` 回退更新逻辑，确保并发安全；初始化时自动清理已有重复行（保留最新记录）
 ### v4.4.5 (2026-08-30)
 - **WebUI 深度重构与美术升级**：
   - **Neo-Bento 现代设计语言**：模块化卡片布局，信息层级与留白微调，支持 AstrBot `light` / `dark` 动态主题适配。
