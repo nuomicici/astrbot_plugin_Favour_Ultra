@@ -137,9 +137,7 @@ class FavourManagerTool(Star):
         self._validate_config()
         
         # 权限管理初始化
-        self.admins_id = context.get_config().get("admins_id", []) if context.get_config() else []
         PermissionManager.get_instance(
-            superusers=self.admins_id,
             level_threshold=self.perm_level_threshold
         )
 
@@ -1713,14 +1711,17 @@ class FavourManagerTool(Star):
             return user_id
 
     async def _check_permission(self, event: AstrMessageEvent, required_level: int) -> bool:
-        if str(event.get_sender_id()) in self.admins_id:
+        # 沿用框架按当前会话配置判定的身份，避免默认配置名单与实际配置不一致。
+        if event.is_admin():
             return True
+        if required_level == PermLevel.SUPERUSER:
+            return False
         # 延迟导入：避免非 aiocqhttp 平台因硬导入而崩溃
         #################
         try:
             from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
         except ImportError:
-            return False  # 非 aiocqhttp 平台，无法获取群权限，回退到仅检查 superuser
+            return False  # 无法获取群权限，Bot 管理员已在上方检查
         #################
         if not isinstance(event, AiocqhttpMessageEvent):
             return False 
@@ -2079,7 +2080,7 @@ class FavourManagerTool(Star):
                 current_relationship = "无"
 
             # 获取 Admin Status
-            if str(user_id) in self.admins_id:
+            if event.is_admin():
                 admin_status = "Bot管理员"
             elif await self._check_permission(event, PermLevel.OWNER):
                 admin_status = "群主"

@@ -1,6 +1,5 @@
 # permissions.py
-import traceback
-from typing import Optional, List, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 from astrbot.api import logger
 if TYPE_CHECKING:
     from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
@@ -15,7 +14,7 @@ class PermLevel:
     SUPERUSER = 4
 
 class PermissionManager:
-    """权限管理器单例类"""
+    """群内权限管理器；Bot 管理员身份由调用方使用 event.is_admin() 判断。"""
     _instance: Optional["PermissionManager"] = None
 
     def __new__(cls, *args, **kwargs):
@@ -26,24 +25,20 @@ class PermissionManager:
 
     def __init__(
         self,
-        superusers: Optional[List[str]] = None,
         level_threshold: int = 50,
     ):
         if self._initialized:
             return
-        self.superusers = superusers or []
         self.level_threshold = level_threshold
         self._initialized = True
 
     @classmethod
     def get_instance(
         cls,
-        superusers: Optional[List[str]] = None,
         level_threshold: int = 50,
     ) -> "PermissionManager":
         if cls._instance is None:
             cls._instance = cls(
-                superusers=superusers,
                 level_threshold=level_threshold,
             )
         return cls._instance
@@ -53,13 +48,9 @@ class PermissionManager:
     ) -> int:
         """获取用户在群内的权限级别"""
         try:
-            # 检查超级用户
-            if str(user_id) in self.superusers:
-                return PermLevel.SUPERUSER
-
             group_id = event.get_group_id()
             if not group_id:
-                # 私聊或其他情况，默认为 MEMBER，除非是超级用户
+                # 私聊没有群内角色，Bot 管理员由调用方检查。
                 return PermLevel.MEMBER
                 
             if not user_id:
@@ -83,16 +74,19 @@ class PermissionManager:
                 )
             except Exception as e:
                 # 获取失败（可能不在群里），返回 UNKNOWN
+                logger.warning(f"获取群成员权限失败（群={group_id}, 用户={user_id}）: {e}")
                 return PermLevel.UNKNOWN
 
             role = info.get("role", "unknown")
-            level = int(info.get("level", 0))
-
             if role == "owner":
                 return PermLevel.OWNER
             elif role == "admin":
                 return PermLevel.ADMIN
             elif role == "member":
+                try:
+                    level = int(info.get("level", 0))
+                except (TypeError, ValueError):
+                    level = 0
                 return PermLevel.HIGH if level >= self.level_threshold else PermLevel.MEMBER
             else:
                 return PermLevel.UNKNOWN
