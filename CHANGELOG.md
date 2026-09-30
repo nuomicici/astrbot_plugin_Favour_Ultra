@@ -13,6 +13,9 @@
 https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/releases/tag/v4.3.0
 
 ## 更新日志
+### v4.4.7
+- **搭话时间浮动区间**：新增 `interval_float_hours` 配置项（浮动幅度），搭话间隔从固定值改为在「基准 ± 浮动」范围内随机，让搭话时机更自然（如基准 2h、浮动 0.5h → 实际 1.5~2.5h 随机）；设为 0 时行为与原版完全一致
+- **修复 Pydantic v2 / 新版 SQLModel 下 datetime 时区报错**：`FavourRecord` 模型的 `created_at`/`updated_at`/`last_interaction` 字段改用 `sa_column=Column(DateTime)` 声明，绕过 Pydantic v2 对 naive datetime 的校验拒绝，兼容新旧版本依赖
 ### v4.4.6 (2026-09-21)
 - **修复 `is_global_favour=true` 时旧 `global` 数据丢失问题**（[#26](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/26)）：
   - **根因**：v4.2.2 起共享池 key 从固定 `global` 切换为适配器前缀（如 `aiocqhttp`），但旧数据未迁移，且 `_get_initial_favour` 的兜底条件 `if not self.is_global_favour` 写反，导致全局模式下新记录无法继承旧 `global` 好感度，升级后好感度静默归零

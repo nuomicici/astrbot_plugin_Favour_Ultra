@@ -63,7 +63,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
         "time_start": "08:00",     # 允许搭话的时间范围起点
         "time_end": "23:30",       # 允许搭话的时间范围终点
-        "interval_hours": 2,       # 每 N 小时检查一次
+        "interval_hours": 2,       # 基准巡检间隔（小时）
+        "interval_float_hours": 0, # 浮动幅度（小时），实际间隔在 [基准-浮动, 基准+浮动] 之间随机；0=固定间隔
         "max_sessions_per_round": 3,  # 每轮最多触发几个会话，0=不限制
         # 会话级黑白名单：控制哪些会话允许/禁止主动搭话
         "blocked_sessions": [],    # 黑名单：这些会话不会被主动搭话

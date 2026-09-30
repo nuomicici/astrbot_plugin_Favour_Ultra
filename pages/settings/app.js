@@ -726,7 +726,8 @@ function renderActiveTab() {
             ${uiInput({ path: 'active_chat.time_end', label: '允许搭话结束时间', placeholder: '23:30' })}
           </div>
           <div class="form-row" style="margin-top:12px;">
-            ${uiNumber({ path: 'active_chat.interval_hours', label: '巡检时间间隔（小时）', hint: '默认 2 小时' })}
+            ${uiNumber({ path: 'active_chat.interval_hours', label: '巡检间隔（小时）', hint: '基准时间点，默认 2 小时' })}
+            ${uiNumber({ path: 'active_chat.interval_float_hours', label: '浮动幅度（小时）', hint: '0=固定间隔；如填 0.5 则实际间隔在 基准±0.5h 内随机' })}
             ${uiNumber({ path: 'active_chat.max_sessions_per_round', label: '每轮最多触发会话数', hint: '0 表示不限制' })}
           </div>
         `

@@ -13,7 +13,7 @@ from aiofiles.os import path as aio_path
 from sqlmodel import SQLModel, Field, select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import text
+from sqlalchemy import text, Column, DateTime
 from sqlalchemy.exc import OperationalError as SAOperationalError, IntegrityError as SAIntegrityError
 from astrbot.api import logger
 from .utils import is_valid_userid
@@ -51,9 +51,9 @@ class FavourRecord(SQLModel, table=True):
     is_unique: bool = Field(default=False)
     username: str = Field(default="")  # 用户昵称，供 WebUI 数据管理展示
     #################
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
-    last_interaction: datetime = Field(default_factory=datetime.now)  # 最后互动时间，用于衰减
+    created_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, default=datetime.now))
+    updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, default=datetime.now, onupdate=datetime.now))
+    last_interaction: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, default=datetime.now))
 
 
 class FavourDBManager:

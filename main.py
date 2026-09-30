@@ -99,6 +99,7 @@ class FavourManagerTool(Star):
         self.active_chat_time_start = active_conf.get("time_start", "08:00")
         self.active_chat_time_end = active_conf.get("time_end", "23:30")
         self.active_chat_interval = active_conf.get("interval_hours") or 2
+        self.active_chat_interval_float = active_conf.get("interval_float_hours") or 0  # 0=固定间隔
         self.active_chat_max_sessions = active_conf.get("max_sessions_per_round") or 0
         self.active_chat_blocked_sessions = active_conf.get("blocked_sessions") or []
         self.active_chat_allowed_sessions = active_conf.get("allowed_sessions") or []
@@ -160,7 +161,8 @@ class FavourManagerTool(Star):
         
         # 启动主动搭话调度器
         if self.active_chat_enabled:
-            logger.debug(f"[初始化] 启动主动搭话调度器（间隔={self.active_chat_interval}h，时段={self.active_chat_time_start}-{self.active_chat_time_end}，规则数={len(self.active_chat_rules)}）")
+            interval_desc = f"{self.active_chat_interval}h" if not self.active_chat_interval_float else f"{self.active_chat_interval}h(±{self.active_chat_interval_float}h)"
+            logger.debug(f"[初始化] 启动主动搭话调度器（间隔={interval_desc}，时段={self.active_chat_time_start}-{self.active_chat_time_end}，规则数={len(self.active_chat_rules)}）")
             self._active_chat_task = asyncio.create_task(self._active_chat_scheduler())
         else:
             logger.debug("[初始化] 主动搭话已禁用")
@@ -367,7 +369,8 @@ class FavourManagerTool(Star):
         import random as _random
         # 调度器启动：记录配置概要，便于确认主动搭话是否真正运行
         logger.warning(
-            f"[搭话调度器] 已启动 | 间隔 {self.active_chat_interval}h | "
+            f"[搭话调度器] 已启动 | 间隔 {self.active_chat_interval}"
+            f"{'h(±' + str(self.active_chat_interval_float) + 'h)' if self.active_chat_interval_float else 'h'} | "
             f"时段 {self.active_chat_time_start}-{self.active_chat_time_end} | "
             f"每轮上限 {self.active_chat_max_sessions} | 规则数 {len(self.active_chat_rules)} | "
             f"白名单 {self.active_chat_allowed_sessions or '空(全部允许)'} | "
@@ -381,7 +384,20 @@ class FavourManagerTool(Star):
                     await asyncio.sleep(60)
                     _first_round = False
                 else:
-                    interval_seconds = max(1, self.active_chat_interval) * 3600
+                    base_hours = max(1, self.active_chat_interval)
+                    float_hours = self.active_chat_interval_float
+                    if float_hours and float_hours > 0:
+                        # 浮动模式：基准 ± 浮动幅度，下限不低于 0.1h（6分钟）
+                        low = max(0.1, base_hours - float_hours)
+                        high = base_hours + float_hours
+                        interval_seconds = _random.uniform(low * 3600, high * 3600)
+                        logger.debug(
+                            f"[搭话调度器] 本轮随机等待 {interval_seconds/3600:.2f}h "
+                            f"（基准 {base_hours}h ± {float_hours}h → {low:.1f}~{high:.1f}h）"
+                        )
+                    else:
+                        # 固定间隔
+                        interval_seconds = base_hours * 3600
                     await asyncio.sleep(interval_seconds)
                 if not self.active_chat_enabled:
                     continue
@@ -1470,6 +1486,7 @@ class FavourManagerTool(Star):
         self.active_chat_time_start = ac.get("time_start", "08:00")
         self.active_chat_time_end = ac.get("time_end", "23:30")
         self.active_chat_interval = ac.get("interval_hours") or 2
+        self.active_chat_interval_float = ac.get("interval_float_hours") or 0
         self.active_chat_max_sessions = ac.get("max_sessions_per_round") or 0
         self.active_chat_blocked_sessions = ac.get("blocked_sessions") or []
         self.active_chat_allowed_sessions = ac.get("allowed_sessions") or []
@@ -1539,7 +1556,8 @@ class FavourManagerTool(Star):
         
         if self.active_chat_enabled:
             self._active_chat_task = asyncio.create_task(self._active_chat_scheduler())
-            logger.info(f"主动搭话调度器已按新配置重启（间隔 {self.active_chat_interval}h，{self.active_chat_time_start}-{self.active_chat_time_end}）。")
+            interval_desc = f"{self.active_chat_interval}h" if not self.active_chat_interval_float else f"{self.active_chat_interval}h(±{self.active_chat_interval_float}h)"
+            logger.info(f"主动搭话调度器已按新配置重启（间隔 {interval_desc}，{self.active_chat_time_start}-{self.active_chat_time_end}）。")
         else:
             logger.info("主动搭话已禁用，调度器已停止。")
 
