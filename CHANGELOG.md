@@ -9,10 +9,14 @@
 - 早上好！
 - 早上好[好感度 持平]
 ```
-4. 如遇问题，可以复制下方链接，于 手动下载 -> 链接下载 处手动回退
-https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/releases/tag/v4.3.0
 
 ## 更新日志
+### v4.4.8 (2026-10-21)
+- **完善搭话功能**：
+  1. 因主动搭话属于插件输出，无法经过大部分插件/框架自带的消息修饰阶段，因此主动删除好感度标签
+  2. 添加主动搭话环境适配和相关配置项，可根据私信/群组进行单独配置
+  3. 根据修改2，添加变量，方便模型理解不同环境
+*请注意需要检查主动搭话提示词！*
 ### v4.4.7 (2026-09-30)
 - **搭话时间浮动区间**：新增 `interval_float_hours` 配置项（浮动幅度），搭话间隔从固定值改为在「基准 ± 浮动」范围内随机，让搭话时机更自然（如基准 2h、浮动 0.5h → 实际 1.5~2.5h 随机）；设为 0 时行为与原版完全一致
 - **修复 Pydantic v2 / 新版 SQLModel 下 datetime 时区报错**：`FavourRecord` 模型的 `created_at`/`updated_at`/`last_interaction` 字段改用 `sa_column=Column(DateTime)` 声明，绕过 Pydantic v2 对 naive datetime 的校验拒绝，兼容新旧版本依赖

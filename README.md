@@ -1,18 +1,18 @@
 <div align="center">
 <img style="width:70%" src="https://count.getloli.com/@astrbot_plugin_Favour_Ultra?name=astrbot_plugin_Favour_Ultra&theme=booru-lewd&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Banner">
 
-# 好感度/关系管理系统 (Favour Ultra)
+# 可自定义好感度系统 (Favour Ultra)
 
-[![当前版本](https://img.shields.io/badge/当前版本v4.4.7-blue?style=for-the-badge)](CHANGELOG.md)
+[![当前版本](https://img.shields.io/badge/当前版本v4.4.8-blue?style=for-the-badge)](CHANGELOG.md)
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
 <div align="left" style="width:70%">
 
-最新动态 (2026-09-30)
+最新动态 (2026-10-21)
 
+* **完善搭话功能 (v4.4.8)**：添加多个配置项、对群组/私聊环境进行分段适配
 * **搭话时间浮动区间 (v4.4.7)**：新增浮动幅度设置，搭话间隔从固定变为「基准 ± 浮动」随机，让机器人不再是准点搭话，而是"大概N小时想起来搭话一次"
-* **修复新版依赖兼容 (v4.4.7)**：修复 Pydantic v2 / 新版 SQLModel 环境下 datetime 时区校验报错的问题
 * **必看！**：如果后台显示“无法识别好感度标签”，请先尝试在预设对话中添加如下内容并清空历史对话记录！（若无效请前往反馈）
 ```
 - 你好！
@@ -29,7 +29,7 @@
 
 ## 📖 插件概述
 
-本插件为 AstrBot 赋予了可持久保存的**好感度与人际关系系统**。它不仅仅是一个数值计数器：通过与大语言模型（LLM）联动，把好感度、关系和角色态度写入对话上下文，让 Bot 根据互动逐渐改变与你相处的方式——从陌生人、朋友，到恋人，甚至死敌。
+本插件为 AstrBot 赋予了可持久保存的**好感度与人际关系系统**。它不止是一个数值计数器：通过与大语言模型（LLM）联动，把好感度、关系和角色态度写入对话上下文，让 Bot 根据互动逐渐改变与你相处的方式——从陌生人、朋友，到恋人，又或者死敌。
 
 **核心特性：**
 

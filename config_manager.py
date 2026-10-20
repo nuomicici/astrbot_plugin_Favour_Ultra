@@ -69,6 +69,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 会话级黑白名单：控制哪些会话允许/禁止主动搭话
         "blocked_sessions": [],    # 黑名单：这些会话不会被主动搭话
         "allowed_sessions": [],    # 白名单：为空=全部允许；非空=仅允许列出的会话
+        # 白名单用户：这些用户 ID 无论在哪个会话（只要会话不在黑名单中）都有几率被搭话
+        # 优先级高于 global_scope；为空则不启用，仅依靠会话白名单/全局生效开关
+        "white_list_users": [],
+        # 全局生效范围：当 allowed_sessions 和 white_list_users 均为空时生效
+        # "all"=全部会话, "private"=仅私信, "group"=仅群聊
+        "global_scope": "all",
+        # 群聊@功能：在群聊中主动搭话时，是否在消息首部硬编码 @ 目标用户（不经过LLM）
+        # 开启后无论何种发送路径都会在第一段消息前插入 @，让用户在群内收到通知
+        "group_at": True,
         # 按好感度区间分配触发概率（百分比），按 min_favour 从高到低匹配
         "rules": [
             {"min_favour": 90, "max_favour": 1000, "probability": 15},
@@ -76,13 +85,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             {"min_favour": 50, "max_favour": 69,  "probability": 3},
             {"min_favour": 0,  "max_favour": 49,  "probability": 1},
         ],
-        # LLM 搭话提示词。可用占位符：{current_time}=当前时间, {last_interaction_ago}=距上次互动时长, {favour}=好感度, {relationship}=关系, {user_name}=用户ID
+        # LLM 搭话提示词。可用占位符：{current_time}=当前时间, {last_interaction_ago}=距上次互动时长, {favour}=好感度, {relationship}=关系, {user_name}=用户ID, {is_group}=是否群聊(true/false)
         "llm_prompt": (
             "现在时间是 {current_time}，距离上次互动已经 {last_interaction_ago}。\n"
             "请以自然、不经意的方式向用户 {user_name} 发起聊天。\n"
             "当前好感度：{favour}，关系：{relationship}。\n"
-            "请按照你的人设对用户发起对话\n"
-            "注意：这是一条系统触发的主动搭话，不是用户要求你发送的。"
+            "请按照你的人设对用户发起对话。\n"
+            "注意：这是一条系统触发的主动搭话，不是用户要求你发送的。\n"
+            "当前会话类型：{is_group}。若为群聊，请注意你的发言会被群内所有人看到，内容应适合公开场合，不必提及@或通知。"
         ),
     },
 
@@ -317,7 +327,23 @@ class PluginConfigManager:
                             {"min_favour": 0, "max_favour": covered_min - 1, "probability": 1}
                         ]
                         logger.info(f"[配置升级] 主动搭话规则未覆盖 0~{covered_min-1} 好感度区间，已自动补充兜底规则(概率1%)。")
-        
+
+            # 配置升级：llm_prompt —— 若用户使用旧版默认提示词（无群组相关内容），
+            # 则自动迁移到新版默认提示词（含群组场景说明）。
+            # 判断依据：旧版默认提示词末尾为"…不是用户要求你发送的。"（无群组句）
+            _old_default_prompts = [
+                # v1 旧默认（无群组说明，最后一行无句号）
+                "现在时间是 {current_time}，距离上次互动已经 {last_interaction_ago}。\n"
+                "请以自然、不经意的方式向用户 {user_name} 发起聊天。\n"
+                "当前好感度：{favour}，关系：{relationship}。\n"
+                "请按照你的人设对用户发起对话\n"
+                "注意：这是一条系统触发的主动搭话，不是用户要求你发送的。",
+            ]
+            current_prompt = ac.get("llm_prompt", "")
+            if current_prompt in _old_default_prompts:
+                ac["llm_prompt"] = DEFAULT_CONFIG["active_chat"]["llm_prompt"]
+                logger.info("[配置升级] 主动搭话提示词已更新为新版默认（含群组场景说明）。")
+
         return config
 
     def _migrate_old_config(self, old: Dict[str, Any]) -> Dict[str, Any]:
