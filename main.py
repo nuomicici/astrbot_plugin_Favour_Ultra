@@ -103,6 +103,9 @@ class FavourManagerTool(Star):
         self.active_chat_max_sessions = active_conf.get("max_sessions_per_round") or 0
         self.active_chat_blocked_sessions = active_conf.get("blocked_sessions") or []
         self.active_chat_allowed_sessions = active_conf.get("allowed_sessions") or []
+        self.active_chat_white_list_users = active_conf.get("white_list_users") or []
+        self.active_chat_global_scope = active_conf.get("global_scope", "all")  # "all"/"private"/"group"
+        self.active_chat_group_at = active_conf.get("group_at", True)  # 群聊搭话时是否@目标用户
         self.active_chat_rules = active_conf.get("rules", [])
         self.active_chat_llm_prompt = active_conf.get("llm_prompt", "")
         
@@ -371,9 +374,29 @@ class FavourManagerTool(Star):
             f"{'h(±' + str(self.active_chat_interval_float) + 'h)' if self.active_chat_interval_float else 'h'} | "
             f"时段 {self.active_chat_time_start}-{self.active_chat_time_end} | "
             f"每轮上限 {self.active_chat_max_sessions} | 规则数 {len(self.active_chat_rules)} | "
-            f"白名单 {self.active_chat_allowed_sessions or '空(全部允许)'} | "
+            f"白名单用户 {self.active_chat_white_list_users or '空'} | "
+            f"白名单会话 {self.active_chat_allowed_sessions or '空'} | "
+            f"全局范围 {self.active_chat_global_scope} | "
+            f"群聊@ {self.active_chat_group_at} | "
             f"已缓存会话事件 {len(self._last_events)} 个 | 平台缓存 {list(self._platform_cache.keys())}"
         )
+        # 检测用户是否已自定义 llm_prompt（与当前默认提示词不同），若是则提醒关注 group_at 功能
+        _default_prompt = (
+            "现在时间是 {current_time}，距离上次互动已经 {last_interaction_ago}。\n"
+            "请以自然、不经意的方式向用户 {user_name} 发起聊天。\n"
+            "当前好感度：{favour}，关系：{relationship}。\n"
+            "请按照你的人设对用户发起对话。\n"
+            "注意：这是一条系统触发的主动搭话，不是用户要求你发送的。\n"
+            "当前会话类型：{is_group}。若为群聊，请注意你的发言会被群内所有人看到，内容应适合公开场合，不必提及@或通知。"
+        )
+        if self.active_chat_llm_prompt and self.active_chat_llm_prompt.strip() != _default_prompt.strip():
+            logger.warning(
+                "[搭话调度器] 检测到您已自定义搭话提示词（llm_prompt）。\n"
+                "  新增功能提醒：群聊搭话现已支持自动@功能（group_at 开关，默认开启）。\n"
+                "  此功能为硬编码行为，不依赖 LLM，与 prompt 内容无关，无需修改您的提示词。\n"
+                "  若您在提示词中有针对群聊场景的特殊指令，请确认与 @功能 是否冲突。\n"
+                "  可在配置中心 active_chat → group_at 开关来启用/关闭群聊自动@。"
+            )
         _first_round = True
         while True:
             try:
@@ -426,19 +449,52 @@ class FavourManagerTool(Star):
                     logger.debug("[搭话调度器] 无用户记录，跳过本轮。")
                     continue
                 
-                # 按会话分组
+                # ── 会话分组：综合白名单用户 / 会话白名单 / 全局生效开关 ──
+                # 优先级（从高到低）：
+                #   1. 会话黑名单（blocked_sessions）：始终排除，不可被任何白名单覆盖
+                #   2. 白名单用户（white_list_users）：在任意会话（不在黑名单中）均有资格被搭话
+                #   3. 会话白名单（allowed_sessions）：非白名单用户 + 会话白名单非空时仅允许列出会话
+                #   4. 全局生效开关（global_scope）：当 allowed_sessions 和 white_list_users 均为空时生效
+                #      "all"=不限, "private"=仅私信(FriendMessage), "group"=仅群聊(GroupMessage)
+
+                have_session_whitelist = bool(self.active_chat_allowed_sessions)
+                have_user_whitelist = bool(self.active_chat_white_list_users)
+                global_scope = self.active_chat_global_scope or "all"
+
                 session_groups: Dict[str, List[FavourRecord]] = {}
                 for record in all_records:
                     sid = record.session_id
-                    
-                    # 搭话会话级黑白名单过滤（支持精确匹配与尾缀匹配，便于用户填纯QQ号）
-                    if self.active_chat_allowed_sessions and not self._session_in_list(sid, self.active_chat_allowed_sessions):
-                        continue
+                    user_id = record.user_id
+
+                    # Step 1：黑名单会话 —— 始终排除
                     if self._session_in_list(sid, self.active_chat_blocked_sessions):
                         continue
-                    
-                    # 过滤冷暴力/拉黑用户
-                    user_id = record.user_id
+
+                    is_wl_user = have_user_whitelist and user_id in [str(u) for u in self.active_chat_white_list_users]
+
+                    if not is_wl_user:
+                        # 非白名单用户：走会话白名单 / 全局生效开关
+                        if have_session_whitelist:
+                            # Step 2：会话白名单非空 → 仅允许白名单会话
+                            if not self._session_in_list(sid, self.active_chat_allowed_sessions):
+                                continue
+                        elif not have_user_whitelist:
+                            # Step 3：allowed_sessions 和 white_list_users 均为空 → 按 global_scope 过滤
+                            if global_scope == "private":
+                                if "FriendMessage" not in str(sid) and "PrivateMessage" not in str(sid):
+                                    continue
+                            elif global_scope == "group":
+                                if "GroupMessage" not in str(sid):
+                                    continue
+                            # global_scope == "all"：不过滤
+                        # else: have_user_whitelist 非空但此用户不在其中，
+                        #   若同时 allowed_sessions 非空 → 走会话白名单（上方已处理）
+                        #   若 allowed_sessions 为空 → 仅白名单用户参与，跳过此用户
+                        else:
+                            continue
+                    # else: 白名单用户 + 会话不在黑名单 → 始终允许（已过 Step 1）
+
+                    # Step 4：过滤冷暴力/拉黑用户
                     blacklist_key = f"{sid}:{user_id}" if not self._is_shared_session(sid) else user_id
                     if blacklist_key in self.auto_blacklisted:
                         continue
@@ -446,7 +502,7 @@ class FavourManagerTool(Star):
                     if cv_key in self.cold_violence_users:
                         if datetime.now() < self.cold_violence_users[cv_key]:
                             continue
-                    
+
                     if sid not in session_groups:
                         session_groups[sid] = []
                     session_groups[sid].append(record)
@@ -541,15 +597,27 @@ class FavourManagerTool(Star):
                                 rel = record.relationship or "无"
                                 current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 last_ago = self._calc_last_interaction_ago(record.last_interaction)
-                                
+                                is_group_str = "群聊" if "GroupMessage" in str(session_id) else "私信"
+
                                 if self.active_chat_llm_prompt:
-                                    prompt = self.active_chat_llm_prompt.format(
-                                        current_time=current_time_str,
-                                        last_interaction_ago=last_ago,
-                                        favour=record.favour,
-                                        relationship=rel,
-                                        user_name=user_id
-                                    )
+                                    try:
+                                        prompt = self.active_chat_llm_prompt.format(
+                                            current_time=current_time_str,
+                                            last_interaction_ago=last_ago,
+                                            favour=record.favour,
+                                            relationship=rel,
+                                            user_name=user_id,
+                                            is_group=is_group_str,
+                                        )
+                                    except KeyError:
+                                        # 兼容旧版自定义提示词（不含 {is_group} 占位符）
+                                        prompt = self.active_chat_llm_prompt.format(
+                                            current_time=current_time_str,
+                                            last_interaction_ago=last_ago,
+                                            favour=record.favour,
+                                            relationship=rel,
+                                            user_name=user_id,
+                                        )
                                 else:
                                     prompt = (
                                         f"现在时间是 {current_time_str}，距离上次互动已经 {last_ago}。"
@@ -868,14 +936,25 @@ class FavourManagerTool(Star):
         if buffer_text:
             final_segments.append(buffer_text)
         
-        # 第三部：恢复保护块并发送
+        # 第三步：恢复保护块并发送
+        # 判断是否需要在群聊首段插入 @ （group_at 开关开启 + 群聊会话 + 有目标用户 ID）
+        is_group_session = "GroupMessage" in str(session_id)
+        need_at = self.active_chat_group_at and is_group_session and bool(user_id)
+
+        from astrbot.api.event import MessageChain
+        first_sent = False
         for i, seg in enumerate(final_segments):
             restored = restore_blocks(seg).strip()
             if not restored:
                 continue
-            
-            from astrbot.api.event import MessageChain
-            chain = MessageChain().message(restored)
+
+            chain = MessageChain()
+            # 仅在第一段且满足条件时插入 At 组件
+            if not first_sent and need_at:
+                chain.chain.append(At(qq=user_id))
+                chain.chain.append(Plain(" "))
+            chain.message(restored)
+            first_sent = True
             try:
                 await self.context.send_message(session_id, chain)
                 if i < len(final_segments) - 1:
@@ -1488,6 +1567,9 @@ class FavourManagerTool(Star):
         self.active_chat_max_sessions = ac.get("max_sessions_per_round") or 0
         self.active_chat_blocked_sessions = ac.get("blocked_sessions") or []
         self.active_chat_allowed_sessions = ac.get("allowed_sessions") or []
+        self.active_chat_white_list_users = ac.get("white_list_users") or []
+        self.active_chat_global_scope = ac.get("global_scope", "all")
+        self.active_chat_group_at = ac.get("group_at", True)
         self.active_chat_rules = ac.get("rules", [])
         self.active_chat_llm_prompt = ac.get("llm_prompt", "")
 
@@ -2341,9 +2423,31 @@ class FavourManagerTool(Star):
     async def update_data(self, event: AstrMessageEvent):
         if not hasattr(event, 'message_obj'): return
         
-        # 搭话合成事件：不更新好感度数据
+        # 搭话合成事件：不更新好感度数据，但仍需清除标签（防止标签暴露给用户）
         if event.get_extra("_is_active_chat_synthetic"):
-            logger.debug("[搭话管线] 搭话合成事件，跳过好感度数据更新。")
+            logger.debug("[搭话管线] 搭话合成事件，跳过好感度数据更新，清除LLM输出中的控制标签。")
+            res = event.get_result()
+            if res and res.chain:
+                new_chain = []
+                for comp in res.chain:
+                    if isinstance(comp, Plain) and comp.text:
+                        t = self.favour_pattern.sub("", comp.text)
+                        t = self.relationship_pattern.sub("", t)
+                        t = self.dissolution_pattern.sub("", t)
+                        t = self.active_rel_pattern.sub("", t)
+                        t = t.rstrip()
+                        if t.strip():
+                            new_chain.append(Plain(t))
+                    else:
+                        new_chain.append(comp)
+                # 群聊搭话合成事件：在 chain 首部插入 At 组件（group_at 开关）
+                target_uid = event.get_extra("_active_chat_target_uid")
+                session_id = getattr(event, "unified_msg_origin", "") or ""
+                is_group_session = "GroupMessage" in str(session_id)
+                if self.active_chat_group_at and is_group_session and target_uid and new_chain:
+                    new_chain = [At(qq=str(target_uid)), Plain(" ")] + new_chain
+                    logger.debug(f"[搭话管线] 群聊合成事件已在消息首部插入 @{target_uid}。")
+                res.chain = new_chain
             return
         
         msg_id = str(event.message_obj.message_id)
