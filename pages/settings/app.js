@@ -706,6 +706,7 @@ function renderActiveTab() {
     { code: '{favour}', desc: '当前好感度数值' },
     { code: '{relationship}', desc: '当前关系名称' },
     { code: '{user_name}', desc: '目标用户ID或昵称' },
+    { code: '{is_group}', desc: '会话类型（群聊/私信）' },
   ];
 
   return `
@@ -773,15 +774,52 @@ function renderActiveTab() {
       })}
 
       ${uiBentoCard({
+        title: '群聊 @ 功能',
+        desc: '群聊中主动搭话时，在消息首部自动 @ 目标用户，使其收到通知（硬编码，不经过 LLM）',
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 006 0v-1a10 10 0 10-3.92 7.94"/></svg>',
+        content: `
+          ${uiSwitch({
+            path: 'active_chat.group_at',
+            label: '群聊搭话自动 @',
+            desc: '开启后，在群聊会话中主动搭话的第一段消息前插入 @目标用户；私信会话不受影响'
+          })}
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '全局生效范围',
+        desc: '当会话白名单与白名单用户均为空时，按此范围筛选参与搭话的会话类型',
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20"/></svg>',
+        content: `
+          ${uiSelect({
+            path: 'active_chat.global_scope',
+            label: '生效范围',
+            hint: '优先级低于会话白名单和白名单用户',
+            options: [
+              ['all',     '全部会话（私信 + 群聊）'],
+              ['private', '仅私信'],
+              ['group',   '仅群聊'],
+            ]
+          })}
+        `
+      })}
+
+      ${uiBentoCard({
         title: '搭话会话黑名单',
-        desc: '这些会话绝不会触发主动搭话',
+        desc: '这些会话绝不会触发主动搭话，优先级最高',
         content: uiStringList({ path: 'active_chat.blocked_sessions', label: '黑名单会话 UMO 列表', placeholder: 'aiocqhttp:GroupMessage:xxx' })
       })}
 
       ${uiBentoCard({
         title: '搭话会话白名单',
-        desc: '留空表示允许全部；若填入则仅这些会话允许搭话',
+        desc: '留空表示允许全部（受全局范围限制）；填入后仅这些会话允许搭话（白名单用户除外）',
         content: uiStringList({ path: 'active_chat.allowed_sessions', label: '白名单会话 UMO 列表', placeholder: 'aiocqhttp:GroupMessage:xxx' })
+      })}
+
+      ${uiBentoCard({
+        title: '白名单用户',
+        desc: '这些用户 ID 无论在哪个会话（只要不在黑名单会话中）都有几率被搭话，优先级高于会话白名单和全局范围',
+        content: uiStringList({ path: 'active_chat.white_list_users', label: '白名单用户 ID 列表', placeholder: '用户ID，如 123456789' })
       })}
     </div>
   `;

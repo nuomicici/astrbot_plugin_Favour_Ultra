@@ -1,7 +1,7 @@
 name: astrbot_plugin_Favour_Ultra
 display_name: 可自定义好感度系统
 author: "糯米茨"
-version: v4.4.8
+version: v4.4.9
 description: "专精好感度功能的系统，让你的bot在情感上更加真实——将好感度的处理交由AI自主决策，并配备后台可视化操作配置。又名好感度Ultra。"
 repo: https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/
 astrbot_version: ">=4.24"
