@@ -3,14 +3,15 @@
 
 # 可自定义好感度系统 (Favour Ultra)
 
-[![当前版本](https://img.shields.io/badge/当前版本v4.4.9-blue?style=for-the-badge)](CHANGELOG.md)
+[![当前版本](https://img.shields.io/badge/当前版本v4.4.10-blue?style=for-the-badge)](CHANGELOG.md)
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
 <div align="left" style="width:70%">
 
-最新动态 (2026-10-21)
+最新动态 (2026-10-25)
 
+* **修复跨夜搭话时段 (v4.4.10)**：`time_start` 晚于 `time_end` 时按跨夜时段判定（如 `16:00`-`09:30`），修复夜间时段失效问题
 * **主动搭话扩充 (v4.4.9)**：新增白名单用户（跨会话触发）、全局范围开关（仅私信/仅群聊/全部）、群聊自动 @ 功能；修复合成事件管线好感度标签外泄；WebUI 同步更新
 * **完善搭话功能 (v4.4.8)**：添加多个配置项、对群组/私聊环境进行分段适配
 * **必看！**：如果后台显示“无法识别好感度标签”，请先尝试在预设对话中添加如下内容并清空历史对话记录！（若无效请前往反馈）
@@ -195,7 +196,7 @@ git clone https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
 | :--- | :--- | :--- |
 | 启用主动搭话功能 `enabled` | 关闭 | 开启后台巡检，使用已有用户记录挑选搭话目标。 |
 | 允许搭话开始时间 `time_start` | `08:00` | 使用 AstrBot 所在机器的本地时间，格式 `HH:MM`。 |
-| 允许搭话结束时间 `time_end` | `23:30` | 当前按同一天的起止时间比较，请填写开始时间不晚于结束时间的时段。 |
+| 允许搭话结束时间 `time_end` | `23:30` | 使用 `HH:MM` 格式。`time_end` 小于 `time_start` 时按跨夜时段处理（如 `16:00`-`09:30` 覆盖 16:00–23:59 与 00:00–09:30）；两者相同表示全天 24 小时可搭话。 |
 | 巡检间隔 `interval_hours` | `2` 小时 | 后续巡检的基准等待时间，运行时基准最低按 1 小时计算。 |
 | 浮动幅度 `interval_float_hours` | `0` 小时 | `0` 为固定间隔；大于 `0` 时，在「基准 ± 浮动」内随机等待，最低等待 0.1 小时。 |
 | 每轮最多触发会话数 `max_sessions_per_round` | `3` | 限制一轮搭话的会话数量，`0` 表示不限制。每个会话每轮最多选中一名用户。 |

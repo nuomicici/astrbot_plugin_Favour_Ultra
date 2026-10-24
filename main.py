@@ -436,7 +436,17 @@ class FavourManagerTool(Star):
                 end_minutes = end_h * 60 + end_m
                 now_minutes = now.hour * 60 + now.minute
                 
-                if now_minutes < start_minutes or now_minutes > end_minutes:
+                if start_minutes == end_minutes:
+                    # 起止时间相同视为全天 24 小时可搭话
+                    in_window = True
+                elif start_minutes < end_minutes:
+                    # 同日时段，如 08:00-23:30
+                    in_window = start_minutes <= now_minutes <= end_minutes
+                else:
+                    # 跨夜时段，如 16:00-09:30
+                    in_window = now_minutes >= start_minutes or now_minutes <= end_minutes
+
+                if not in_window:
                     logger.debug(f"[搭话调度器] 当前时间 {now.strftime('%H:%M')} 不在允许时段 {self.active_chat_time_start}-{self.active_chat_time_end}，跳过。")
                     continue  # 不在允许的时间范围内
                 

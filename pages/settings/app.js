@@ -723,8 +723,8 @@ function renderActiveTab() {
               label: '启用主动搭话功能',
               desc: '允许 Bot 在设定的时间段内随机主动向用户发消息'
             })}
-            ${uiInput({ path: 'active_chat.time_start', label: '允许搭话开始时间', placeholder: '08:00' })}
-            ${uiInput({ path: 'active_chat.time_end', label: '允许搭话结束时间', placeholder: '23:30' })}
+            ${uiInput({ path: 'active_chat.time_start', label: '允许搭话开始时间', hint: 'HH:MM；大于结束时间表示跨夜时段', placeholder: '08:00' })}
+            ${uiInput({ path: 'active_chat.time_end', label: '允许搭话结束时间', hint: '与开始时间相同表示全天 24 小时', placeholder: '23:30' })}
           </div>
           <div class="form-row" style="margin-top:12px;">
             ${uiNumber({ path: 'active_chat.interval_hours', label: '巡检间隔（小时）', hint: '基准时间点，默认 2 小时' })}
