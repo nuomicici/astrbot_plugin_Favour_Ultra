@@ -14,6 +14,9 @@
 ```
 
 ## 更新日志
+### beta (未发布) — 提示词精简实验
+- **系统提示词精简（仅 beta）**：删除 `<Rules>` 中与 `<FavorLog>` 重复的“数据以 FavourContext 为准”、压缩 `<RelationshipTags>` 的冗余说明与不可自查的次数限制、`<FavorLog>` 改用 `N` 注解、简化 GALGAME/REALISTIC 措辞
+- **注意**：本分支会改变 system_prompt，升级后对话缓存需重建；如需保留缓存请使用 `master` 分支
 ### v4.4.11 (2026-10-27)
 - **新增自定义好感度判定模式与判定提示词**（[#29](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/29)）：
   - 判定模式 `favour_mode` 新增 `custom` 选项，配合新配置项 `favour_mode_custom_prompt` 可自由书写判定规则，注入 LLM 的 `<ScoringMode>` 段落
