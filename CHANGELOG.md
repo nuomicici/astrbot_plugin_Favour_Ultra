@@ -1,4 +1,7 @@
 # 更新须知
+> **分支说明**
+> - `master`：正式版，内置提示词与旧版逐字一致，升级不会破坏对话缓存（仅当您主动启用 `custom` 判定模式时才会重建缓存）。
+> - `beta`：实验版，对系统提示词做了精简，**升级后会破坏对话缓存**，仅供测试。
 更新后如果无法正常加载，请依次尝试：
 1. 重启框架
 2. 重新安装该插件
@@ -11,6 +14,20 @@
 ```
 
 ## 更新日志
+### beta (未发布) — 提示词精简实验
+- **系统提示词精简（仅 beta）**：删除 `<Rules>` 中与 `<FavorLog>` 重复的“数据以 FavourContext 为准”、压缩 `<RelationshipTags>` 的冗余说明与不可自查的次数限制、`<FavorLog>` 改用 `N` 注解、简化 GALGAME/REALISTIC 措辞
+- **注意**：本分支会改变 system_prompt，升级后对话缓存需重建；如需保留缓存请使用 `master` 分支
+### v4.4.11 (2026-10-27)
+- **新增自定义好感度判定模式与判定提示词**（[#29](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/29)）：
+  - 判定模式 `favour_mode` 新增 `custom` 选项，配合新配置项 `favour_mode_custom_prompt` 可自由书写判定规则，注入 LLM 的 `<ScoringMode>` 段落
+  - 自定义提示词为空时自动回退为 `galgame` 规则并输出警告日志
+  - 配置中心「基础设置 → 判定模式」选择自定义后自动展开提示词输入框，切换模式即时联动显示
+  - 旧配置文件自动合并新增键，无需手动修改
+### v4.4.10 (2026-10-25)
+- **修复跨夜搭话时段判定失效**（[#28](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/28)）：
+  - **问题**：调度器仅按同一天比较 `time_start <= now <= time_end`，当 `time_start` 大于 `time_end`（如 `16:00`-`09:30`）时，00:00–09:30 与 16:00–23:59 均被误判为不在时段内，夜间搭话完全无法触发
+  - **修复**：`time_start > time_end` 时按跨夜时段处理（`now >= start` 或 `now <= end`）；`time_start == time_end` 视为全天 24 小时可搭话
+  - **文档与 WebUI**：README 配置说明补充跨夜时段与全天时段写法，配置中心「主动搭话」Tab 的时间输入框新增对应提示
 ### v4.4.9 (2026-10-21)
 - **主动搭话功能扩充**：
   1. **白名单用户**：新增 `white_list_users` 配置项，列表内的用户 ID 无论在哪个会话（只要会话不在黑名单中）都有几率被触发搭话，优先级高于会话白名单和全局范围开关

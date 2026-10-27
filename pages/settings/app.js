@@ -483,7 +483,8 @@ function renderBasicTab() {
               label: '判定模式',
               options: [
                 ['galgame', 'Galgame 模式（容易提升，情感丰富）'],
-                ['realistic', '拟真模式（严格严谨，步长适中）']
+                ['realistic', '拟真模式（严格严谨，步长适中）'],
+                ['custom', '自定义模式（使用自定义判定提示词）']
               ],
               hint: '影响提升好感度的宽容度'
             })}
@@ -498,6 +499,17 @@ function renderBasicTab() {
               ]
             })}
           </div>
+          ${getVal('favour_mode', 'galgame') === 'custom' ? `
+            <div class="form-row">
+              ${uiTextarea({
+                path: 'favour_mode_custom_prompt',
+                label: '自定义判定提示词',
+                rows: 10,
+                hint: '仅「自定义模式」生效。直接书写判定规则，将注入 LLM 的 <ScoringMode> 段落',
+                placeholder: '例如：&#10;判定规则：&#10;1. 若用户……→ [好感度 上升]&#10;2. 若用户……→ [好感度 降低]&#10;原则：……'
+              })}
+            </div>
+          ` : ''}
         `
       })}
 
@@ -723,8 +735,8 @@ function renderActiveTab() {
               label: '启用主动搭话功能',
               desc: '允许 Bot 在设定的时间段内随机主动向用户发消息'
             })}
-            ${uiInput({ path: 'active_chat.time_start', label: '允许搭话开始时间', placeholder: '08:00' })}
-            ${uiInput({ path: 'active_chat.time_end', label: '允许搭话结束时间', placeholder: '23:30' })}
+            ${uiInput({ path: 'active_chat.time_start', label: '允许搭话开始时间', hint: 'HH:MM；大于结束时间表示跨夜时段', placeholder: '08:00' })}
+            ${uiInput({ path: 'active_chat.time_end', label: '允许搭话结束时间', hint: '与开始时间相同表示全天 24 小时', placeholder: '23:30' })}
           </div>
           <div class="form-row" style="margin-top:12px;">
             ${uiNumber({ path: 'active_chat.interval_hours', label: '巡检间隔（小时）', hint: '基准时间点，默认 2 小时' })}
@@ -2088,6 +2100,12 @@ function bindCustomSelects() {
           if (path === 'favour_decay.mode') {
             collectFormData();
             renderTab('decay');
+          }
+
+          // 判定模式联动（自定义模式显示自定义提示词输入框）
+          if (path === 'favour_mode') {
+            collectFormData();
+            renderTab('basic');
           }
         }
 
