@@ -49,6 +49,7 @@ class FavourManagerTool(Star):
         
         # 基础配置
         self.favour_mode = self.config.get("favour_mode", "galgame")
+        self.favour_mode_custom_prompt = self.config.get("favour_mode_custom_prompt", "")
         self.is_global_favour = self.config.get("is_global_favour", False)
         self.group_sort_by = self.config.get("group_sort_by", "default")
         self.enable_cold_violence = self.config.get("enable_cold_violence", True)
@@ -1531,6 +1532,7 @@ class FavourManagerTool(Star):
         cfg = self.config_mgr.config
         self.config = cfg
         self.favour_mode = cfg.get("favour_mode", "galgame")
+        self.favour_mode_custom_prompt = cfg.get("favour_mode_custom_prompt", "")
         self.is_global_favour = cfg.get("is_global_favour", False)
         self.group_sort_by = cfg.get("group_sort_by", "default")
         self.enable_cold_violence = cfg.get("enable_cold_violence", True)
@@ -1919,6 +1921,49 @@ class FavourManagerTool(Star):
                 logger.error(f"生成图片失败 (Page {page_info}): {e}")
                 await event.send(event.plain_result(f"生成图片失败，请检查日志。"))
 
+    def _build_mode_instruction(self) -> str:
+        """根据 favour_mode 构建好感度判定模式指令（注入 system_prompt 的静态部分）。
+
+        - galgame / realistic：使用内置判定规则；
+        - custom：使用用户自定义的判定提示词（favour_mode_custom_prompt），为空时退回 galgame 规则。
+        """
+        if self.favour_mode == "custom":
+            custom_prompt = (self.favour_mode_custom_prompt or "").strip()
+            if custom_prompt:
+                return "模式：CUSTOM（判定规则见后文 <ScoringModeOverride>）"
+            logger.warning("好感度判定模式为自定义，但自定义判定提示词为空，已回退为 Galgame 规则。")
+
+        if self.favour_mode == "realistic":
+            return (
+                "模式：REALISTIC（低正向、高负向敏感度）\n"
+                "判定规则：\n"
+                "根据人格设定，结合以下规则进行好感度变化"
+                "1. 若用户互动亲密度超过当前关系的边界 → 触发 [好感度 降低] 或 [好感度 持平]。越界惩罚。\n"
+                "2. 若用户输入包含[冒犯、粗鲁、触碰底线] → 触发 [好感度 降低]。阈值低、幅度高，极难修复。\n"
+                "3. 若用户输入为[常规互动] → 触发 [好感度 持平]。\n"
+                "4. 若用户输入与你三观[高度相符]或令你感到[重大共鸣] → 触发 [好感度 上升]。阈值高、幅度低。\n"
+                "原则：严格执行人设性格壁垒，好感度获取需长期积累。"
+            )
+
+        return (
+            "模式：GALGAME（高正向敏感度）\n"
+            "判定规则：\n"
+            "根据人格设定，结合以下规则进行好感度变化"
+            "1. 若用户输入包含[善意、赞美、关心、礼物] → 触发 [好感度 上升]。阈值低、幅度高。\n"
+            "2. 若用户输入包含[轻微失礼、玩笑] → 归类为[亲昵互动] → 触发 [好感度 上升] 或 [好感度 持平]。\n"
+            "3. 若好感度处于较高区间 → 行为倾向：主动推进关系，展现偏爱。\n"
+            "原则：偏向正向数值产出，忽略轻微负面特征。"
+        )
+
+    def _build_custom_mode_override(self) -> str:
+        """custom 模式追加的独立段落：不改动内置模式段落，避免破坏 system_prompt 缓存前缀。"""
+        if self.favour_mode != "custom":
+            return ""
+        custom_prompt = (self.favour_mode_custom_prompt or "").strip()
+        if not custom_prompt:
+            return ""
+        return f"\n\n<ScoringModeOverride>\n{custom_prompt}\n</ScoringModeOverride>"
+
     def _build_favour_levels_prompt(self, current_favour: Optional[int] = None) -> str:
         """根据 favour_levels 配置构建好感度分级规则文本。
         
@@ -2222,25 +2267,8 @@ class FavourManagerTool(Star):
             # ============================================================
             # 构建模式指令（静态，不含动态变量引用）
             # ============================================================
-            if self.favour_mode == "galgame":
-                mode_instruction = (
-                    "模式：GALGAME（高正向敏感度）\n"
-                    "判定规则：\n"
-                    "1. 若用户输入包含[善意、赞美、关心、礼物] → 触发 [好感度 上升]。阈值低、幅度高。\n"
-                    "2. 若用户输入包含[轻微失礼、玩笑] → 归类为[亲昵互动] → 触发 [好感度 上升] 或 [好感度 持平]。\n"
-                    "3. 若好感度处于较高区间 → 行为倾向：主动推进关系，展现偏爱。\n"
-                    "原则：偏向正向数值产出，忽略轻微负面特征。"
-                )
-            else:  # realistic
-                mode_instruction = (
-                    "模式：REALISTIC（低正向、高负向敏感度）\n"
-                    "判定规则：\n"
-                    "1. 若用户互动亲密度超过当前关系的边界 → 触发 [好感度 降低] 或 [好感度 持平]。越界惩罚。\n"
-                    "2. 若用户输入包含[冒犯、粗鲁、触碰底线] → 触发 [好感度 降低]。阈值低、幅度高，极难修复。\n"
-                    "3. 若用户输入为[常规互动] → 触发 [好感度 持平]。\n"
-                    "4. 若用户输入包含[重大共鸣] → 触发 [好感度 上升]。阈值高、幅度低。\n"
-                    "原则：严格执行人设性格壁垒，好感度获取需长期积累。"
-                )
+            mode_instruction = self._build_mode_instruction()
+            custom_mode_override = self._build_custom_mode_override()
 
             # ============================================================
             # 构建动态数据
@@ -2297,7 +2325,7 @@ class FavourManagerTool(Star):
    示例：[主动确认关系:user_123:伴侣:true]
    约束：用户直接命令建立关系→走标签1。每会话≤1次。不得对已有同名关系的用户重复确认。
 </RelationshipTags>
-</FavorabilityPlugin>"""
+</FavorabilityPlugin>{custom_mode_override}"""
 
             # ============================================================
             # PART B: 动态内容 → 注入 extra_user_content_parts（临时注入）

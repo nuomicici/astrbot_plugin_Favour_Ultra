@@ -3,7 +3,7 @@
 
 # 可自定义好感度系统 (Favour Ultra)
 
-[![当前版本](https://img.shields.io/badge/当前版本v4.4.10-blue?style=for-the-badge)](CHANGELOG.md)
+[![当前版本](https://img.shields.io/badge/当前版本v4.4.11-blue?style=for-the-badge)](CHANGELOG.md)
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
@@ -11,6 +11,7 @@
 
 最新动态 (2026-10-25)
 
+* **自定义判定模式 (v4.4.11)**：判定模式新增 `custom`，配合 `favour_mode_custom_prompt` 可自由书写判定提示词，WebUI 选择自定义后即时展开编辑框
 * **修复跨夜搭话时段 (v4.4.10)**：`time_start` 晚于 `time_end` 时按跨夜时段判定（如 `16:00`-`09:30`），修复夜间时段失效问题
 * **主动搭话扩充 (v4.4.9)**：新增白名单用户（跨会话触发）、全局范围开关（仅私信/仅群聊/全部）、群聊自动 @ 功能；修复合成事件管线好感度标签外泄；WebUI 同步更新
 * **完善搭话功能 (v4.4.8)**：添加多个配置项、对群组/私聊环境进行分段适配
@@ -122,7 +123,8 @@ git clone https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
 
 | 界面配置 / 配置键 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| 判定模式 `favour_mode` | `galgame` | `galgame` 偏向包容、容易培养感情；`realistic` 更强调人设边界与真实关系变化。实际增减由 LLM 结合对话判断。 |
+| 判定模式 `favour_mode` | `galgame` | `galgame` 偏向包容、容易培养感情；`realistic` 更强调人设边界与真实关系变化；`custom` 使用自定义判定提示词。实际增减由 LLM 结合对话判断。 |
+| 自定义判定提示词 `favour_mode_custom_prompt` | 内置示例 | 仅 `favour_mode=custom` 时生效，直接书写判定规则，注入 LLM 的 `<ScoringMode>` 段落；留空时回退为 `galgame` 规则。 |
 | 列表排序方式 `group_sort_by` | `default` | `default` 按添加时间；`favour` 按好感度降序；`nickname` 按昵称；`userid` 按用户 ID。数据中心有独立的排序控件。 |
 | 好感度下限 `min_favour_value` | `-200` | 好感度数值的最低边界。 |
 | 好感度上限 `max_favour_value` | `1000` | 好感度数值的最高边界，建议与等级区间配合设置。 |
@@ -402,7 +404,7 @@ Bot 管理员身份沿用 AstrBot 对当前会话的判断。群主、群管理�
 插件会实时解析当前交互对象，并将状态通过 `<FavourContext>` 节点注入动态用户上下文。这包含了当前交互对象的 ID、管理权限、好感度数值与等级、已建立的单边/排他性关系等信息，甚至包含了对当前好感度上限的动态约束声明与末行日志强制提示。系统借此引导大模型在生成回复时做出最符合当前关系阶段与身份设定的选择。
 
 ### 2. 多态输出控制与隐形标签系统
-回复末尾由 LLM 根据内置的**逻辑门**（GALGAME/REALISTIC 模式）输出专属的情感或关系变动标签，插件捕捉后会自动截断并在后台记录，实现数据流转而玩家无感知：
+回复末尾由 LLM 根据内置的**逻辑门**（GALGAME/REALISTIC/CUSTOM 模式）输出专属的情感或关系变动标签，插件捕捉后会自动截断并在后台记录，实现数据流转而玩家无感知：
 *   **基础好感波动**：`[好感度 上升：X]` / `[好感度 降低：Y]` / `[好感度 持平]`
 *   **玩家关系申请**：`[用户申请确认关系:目标用户ID:关系名称:同意(true/false):排他性(true/false)]`
 *   **主动关系确立**：`[主动确认关系:目标用户ID:关系名称:排他性(true/false)]`

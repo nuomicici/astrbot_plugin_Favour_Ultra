@@ -483,7 +483,8 @@ function renderBasicTab() {
               label: '判定模式',
               options: [
                 ['galgame', 'Galgame 模式（容易提升，情感丰富）'],
-                ['realistic', '拟真模式（严格严谨，步长适中）']
+                ['realistic', '拟真模式（严格严谨，步长适中）'],
+                ['custom', '自定义模式（使用自定义判定提示词）']
               ],
               hint: '影响提升好感度的宽容度'
             })}
@@ -498,6 +499,17 @@ function renderBasicTab() {
               ]
             })}
           </div>
+          ${getVal('favour_mode', 'galgame') === 'custom' ? `
+            <div class="form-row">
+              ${uiTextarea({
+                path: 'favour_mode_custom_prompt',
+                label: '自定义判定提示词',
+                rows: 10,
+                hint: '仅「自定义模式」生效。直接书写判定规则，将注入 LLM 的 <ScoringMode> 段落',
+                placeholder: '例如：&#10;判定规则：&#10;1. 若用户……→ [好感度 上升]&#10;2. 若用户……→ [好感度 降低]&#10;原则：……'
+              })}
+            </div>
+          ` : ''}
         `
       })}
 
@@ -2088,6 +2100,12 @@ function bindCustomSelects() {
           if (path === 'favour_decay.mode') {
             collectFormData();
             renderTab('decay');
+          }
+
+          // 判定模式联动（自定义模式显示自定义提示词输入框）
+          if (path === 'favour_mode') {
+            collectFormData();
+            renderTab('basic');
           }
         }
 

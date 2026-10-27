@@ -20,6 +20,15 @@ from astrbot.api import logger
 DEFAULT_CONFIG: Dict[str, Any] = {
     # 基础配置
     "favour_mode": "galgame",
+    # 自定义判定提示词：仅当 favour_mode == "custom" 时生效，注入 system_prompt 的 <ScoringMode> 中
+    "favour_mode_custom_prompt": (
+        "判定规则：\n"
+        "1. 依据「当前好感度等级」与「关系」调整判定宽严。\n"
+        "2. 用户展现善意、真诚关心或值得肯定的行为 → [好感度 上升]。\n"
+        "3. 用户冒犯、敷衍或越界 → [好感度 降低]。\n"
+        "4. 其余常规互动 → [好感度 持平]。\n"
+        "原则：数值产出贴合剧情自然发展，避免无理由的大幅波动。"
+    ),
     "is_global_favour": False,
     "group_sort_by": "default",
     "enable_cold_violence": True,
