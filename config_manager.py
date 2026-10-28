@@ -129,7 +129,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # {favour}=好感度, {max_favour}=好感上限, {relationship}=关系, {exclusive}=排他关系,
         # {rel_context}=会话关系表, {levels}=等级规则, {limit}=上限约束
         "dynamic_prompt_template": (
-            "用户:{user_name} | UID:{user_id} | 管理员:{admin_status} | 好感:{favour}/{max_favour} | "
+            "用户:{user_name} | UID:{user_id} | 身份:{admin_status} | 好感:{favour}/{max_favour} | "
             "用户是你的{relationship}\n"
             "排他关系:{exclusive}{rel_context}\n"
             "等级:{levels}\n"

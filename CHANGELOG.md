@@ -22,6 +22,7 @@
   - 模板必须完整保留全部占位符（`{user_name}`/`{user_id}`/`{admin_status}`/`{favour}`/`{max_favour}`/`{relationship}`/`{exclusive}`/`{rel_context}`/`{levels}`/`{limit}`），保存时前后端双重校验，缺失占位符将拒绝保存并提示中文名称
   - WebUI 中占位符以**胶囊**形式展示中文名称（如「用户名」「用户UID」「关系名称」），点击即可作为整体胶囊插入配置框，序列化时还原为占位符代码
   - 默认模板将原歧义的「关系：{relationship}」改为「用户是你的{relationship}」，语义更明确
+  - 默认模板将「管理员：{admin_status}」改为「身份：{admin_status}」，明确该字段表示用户在当前会话的权限身份（Bot管理员/群主/群管理员/普通用户）
 - **新增「默认关系名称」配置**：`advanced_config.default_relationship`（默认 `陌生人`），用户尚无关系记录时 `{relationship}` 渲染显示该值（替代原先固定的「无」，不改动关系确认/存储逻辑）
 ### v4.4.11 (2026-10-27)
 - **新增自定义好感度判定模式与判定提示词**（[#29](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/29)）：
