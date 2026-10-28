@@ -1037,6 +1037,44 @@ input[type="checkbox"]:checked + .switch-card .switch-ctrl::after,
   transform: translateY(-1px);
 }
 
+/* 胶囊富文本编辑器 (Chip Editor) */
+.chip-editor {
+  width: 100%;
+  min-height: 96px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-surface);
+  color: var(--text-main);
+  font-size: 0.86rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  outline: none;
+  transition: var(--transition-fast);
+}
+
+.chip-editor:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+.chip-editor .chip-placeholder {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  margin: 0 2px;
+  border-radius: var(--radius-full);
+  background: var(--primary-light);
+  border: 1px solid var(--primary-muted);
+  color: var(--primary);
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.5;
+  cursor: default;
+  user-select: none;
+}
+
 /* ---------- 数据中心 (Data Center) ---------- */
 .stats-banner {
   display: grid;

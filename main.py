@@ -29,7 +29,7 @@ from astrbot.core.utils.session_waiter import session_waiter, SessionController
 from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourDBManager, FavourRecord
-from .config_manager import PluginConfigManager
+from .config_manager import PluginConfigManager, DEFAULT_CONFIG
 
 PLUGIN_NAME = "astrbot_plugin_Favour_Ultra"
 
@@ -71,6 +71,8 @@ class FavourManagerTool(Star):
         self.blocked_sessions = adv_conf.get("blocked_sessions") or []
         self.allowed_sessions = adv_conf.get("allowed_sessions") or []
         self.modify_favour_permission = adv_conf.get("modify_favour_permission") or "admin"
+        self.dynamic_prompt_template = adv_conf.get("dynamic_prompt_template") or ""
+        self.default_relationship = adv_conf.get("default_relationship") or "陌生人"
 
         # 冷暴力配置
         cv_conf = self.config.get("cold_violence_config", {})
@@ -1553,6 +1555,8 @@ class FavourManagerTool(Star):
         self.blocked_sessions = adv.get("blocked_sessions") or []
         self.allowed_sessions = adv.get("allowed_sessions") or []
         self.modify_favour_permission = adv.get("modify_favour_permission") or "admin"
+        self.dynamic_prompt_template = adv.get("dynamic_prompt_template") or ""
+        self.default_relationship = adv.get("default_relationship") or "陌生人"
 
         cv = cfg.get("cold_violence_config", {})
         self.cold_violence_consecutive_threshold = cv.get("consecutive_decrease_threshold") or 3
@@ -1964,6 +1968,52 @@ class FavourManagerTool(Star):
             return ""
         return f"\n\n<ScoringModeOverride>\n{custom_prompt}\n</ScoringModeOverride>"
 
+    def _build_dynamic_prompt(
+        self,
+        user_id: str,
+        user_name: str,
+        admin_status: str,
+        current_favour: int,
+        current_relationship: str,
+        exclusive_db_text: str,
+        rel_context: str,
+        levels_rule: str,
+        limit_constraint_text: str,
+    ) -> str:
+        """渲染每轮注入的 <FavourContext> 内容。
+
+        使用 advanced_config.dynamic_prompt_template 作为模板，替换其中的占位符。
+        若模板为空，则退回内置默认模板。
+        """
+        template = (self.dynamic_prompt_template or "").strip()
+        if not template:
+            template = DEFAULT_CONFIG["advanced_config"]["dynamic_prompt_template"]
+
+        # relationship 在无关系记录时为「无」，直接拼入「用户是你的{relationship}」会语义不通，
+        # 渲染层统一改为「陌生人」，不改动关系确认/存储逻辑。
+        rel_display = (current_relationship or "").strip()
+        if not rel_display or rel_display in ("无", "None", "null"):
+            rel_display = (self.default_relationship or "陌生人").strip() or "陌生人"
+
+        value_map = {
+            "user_name": user_name or user_id,
+            "user_id": user_id,
+            "admin_status": admin_status,
+            "favour": current_favour,
+            "max_favour": self.max_favour_value,
+            "relationship": rel_display,
+            "exclusive": exclusive_db_text,
+            "rel_context": rel_context,
+            "levels": levels_rule,
+            "limit": limit_constraint_text,
+        }
+
+        # 用逐项替换而非 str.format：模板中可能含其他花括号，避免 KeyError。
+        rendered = template
+        for key, val in value_map.items():
+            rendered = rendered.replace("{" + key + "}", str(val))
+        return rendered
+
     def _build_favour_levels_prompt(self, current_favour: Optional[int] = None) -> str:
         """根据 favour_levels 配置构建好感度分级规则文本。
         
@@ -2326,10 +2376,17 @@ class FavourManagerTool(Star):
             #   每轮请求重新生成，不影响 system_prompt 缓存
             # ============================================================
             dynamic_prompt = f"""<FavourContext>
-用户:{user_id} | 管理员:{admin_status} | 好感:{current_favour}/{self.max_favour_value} | 关系:{current_relationship}
-排他关系:{exclusive_db_text}{rel_context}
-等级:{levels_rule}
-限制:{limit_constraint_text}
+{self._build_dynamic_prompt(
+    user_id=user_id,
+    user_name=(record.username or user_id) if record else user_id,
+    admin_status=admin_status,
+    current_favour=current_favour,
+    current_relationship=current_relationship,
+    exclusive_db_text=exclusive_db_text,
+    rel_context=rel_context,
+    levels_rule=levels_rule,
+    limit_constraint_text=limit_constraint_text,
+)}
 <MandatoryFooter>回复最后一行必须输出好感度日志标签（上升/降低/持平 三选一），即使历史消息中没有先例也不例外。</MandatoryFooter>
 </FavourContext>"""
 

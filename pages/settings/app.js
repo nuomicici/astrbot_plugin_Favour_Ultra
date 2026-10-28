@@ -448,6 +448,91 @@ function uiTextarea({ path, label, rows = 4, hint = '', placeholder = '', pills 
   `;
 }
 
+// 动态提示词占位符（代码 → 中文名）
+const DYNAMIC_PROMPT_PLACEHOLDERS = [
+  { code: '{user_name}', name: '用户名' },
+  { code: '{user_id}', name: '用户UID' },
+  { code: '{admin_status}', name: '身份' },
+  { code: '{favour}', name: '好感度' },
+  { code: '{max_favour}', name: '好感上限' },
+  { code: '{relationship}', name: '关系名称' },
+  { code: '{exclusive}', name: '排他关系' },
+  { code: '{rel_context}', name: '会话关系表' },
+  { code: '{levels}', name: '等级规则' },
+  { code: '{limit}', name: '上限约束' },
+];
+
+// 将含占位符的模板字符串反序列化为富文本 HTML（占位符转为胶囊）
+function templateToEditorHtml(template) {
+  const text = template == null ? '' : String(template);
+  const codes = DYNAMIC_PROMPT_PLACEHOLDERS.map((p) => p.code);
+  const nameOf = {};
+  DYNAMIC_PROMPT_PLACEHOLDERS.forEach((p) => { nameOf[p.code] = p.name; });
+  let out = '';
+  let i = 0;
+  const plainBuf = [];
+  const flushPlain = () => {
+    if (plainBuf.length) {
+      out += escapeHtml(plainBuf.join('')).replace(/\n/g, '<br>');
+      plainBuf.length = 0;
+    }
+  };
+  while (i < text.length) {
+    let matched = null;
+    for (const code of codes) {
+      if (text.startsWith(code, i)) { matched = code; break; }
+    }
+    if (matched) {
+      flushPlain();
+      out += `<span class="chip-placeholder" contenteditable="false" data-code="${escapeHtml(matched)}">${escapeHtml(nameOf[matched])}</span>`;
+      i += matched.length;
+    } else {
+      plainBuf.push(text[i]);
+      i += 1;
+    }
+  }
+  flushPlain();
+  return out;
+}
+
+// 从富文本编辑器读取内容，胶囊还原为占位符代码，换行转换为 \n
+function editorHtmlToTemplate(editorEl) {
+  const parts = [];
+  const walk = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      parts.push(node.nodeValue);
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node;
+      if (el.classList && el.classList.contains('chip-placeholder')) {
+        parts.push(el.dataset.code || '');
+        return;
+      }
+      if (el.tagName === 'BR') { parts.push('\n'); return; }
+      for (const child of el.childNodes) walk(child);
+      if (el.tagName === 'DIV' || el.tagName === 'P') { parts.push('\n'); }
+    }
+  };
+  for (const child of editorEl.childNodes) walk(child);
+  return parts.join('').replace(/\n+$/, '');
+}
+
+function uiChipEditor({ path, label, hint = '' }) {
+  const val = getVal(path, '');
+  const html = templateToEditorHtml(val);
+  return `
+    <div class="form-group full">
+      <label class="form-label">
+        <span>${label}</span>
+        ${hint ? `<span class="form-label-hint">${hint}</span>` : ''}
+      </label>
+      <div class="chip-editor" data-p="${path}" contenteditable="true" spellcheck="false">${html}</div>
+      <div class="pill-group">
+        ${DYNAMIC_PROMPT_PLACEHOLDERS.map((p) => `<span class="pill-tag" data-chip-insert="${escapeHtml(p.code)}" title="${escapeHtml(p.name)} (${escapeHtml(p.code)})">+ ${escapeHtml(p.name)}</span>`).join('')}
+      </div>
+    </div>
+  `;
+}
+
 function uiStringList({ path, label, placeholder = '输入项...' }) {
   const list = getVal(path, []);
   return `
@@ -906,6 +991,23 @@ function renderAdvTab() {
             ${uiNumber({ path: 'advanced_config.favour_increase_max', label: '好感上升最大值', hint: '默认 3' })}
             ${uiNumber({ path: 'advanced_config.favour_decrease_min', label: '好感下降最小值', hint: '默认 1' })}
             ${uiNumber({ path: 'advanced_config.favour_decrease_max', label: '好感下降最大值', hint: '默认 5' })}
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
+        title: '动态提示词注入更改',
+        desc: '自定义每轮注入给模型的好感度上下文内容；点击下方胶囊将其插入到配置框',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+        content: `
+          ${uiChipEditor({
+            path: 'advanced_config.dynamic_prompt_template',
+            label: '动态注入模板',
+            hint: '必须完整包含全部占位符，否则无法保存'
+          })}
+          <div class="form-row" style="margin-top:12px;">
+            ${uiInput({ path: 'advanced_config.default_relationship', label: '默认关系名称', hint: '用户尚无关系记录时，{relationship} 显示的内容', placeholder: '陌生人' })}
           </div>
         `
       })}
@@ -2131,6 +2233,11 @@ function bindTabEvents(tabKey) {
     };
   });
 
+  // 胶囊编辑器输入监听
+  document.querySelectorAll('#body .chip-editor').forEach((el) => {
+    el.oninput = () => markDirty(true);
+  });
+
   // 占位符药丸插入事件
   document.querySelectorAll('.pill-tag[data-insert]').forEach((pill) => {
     pill.onclick = () => {
@@ -2145,6 +2252,44 @@ function bindTabEvents(tabKey) {
         textarea.selectionStart = textarea.selectionEnd = start + code.length;
         markDirty(true);
       }
+    };
+  });
+
+  // 胶囊编辑器：药丸点击后以胶囊形态插入到配置框
+  document.querySelectorAll('.pill-tag[data-chip-insert]').forEach((pill) => {
+    pill.onclick = () => {
+      const code = pill.dataset.chipInsert;
+      const meta = DYNAMIC_PROMPT_PLACEHOLDERS.find((p) => p.code === code);
+      const editor = pill.closest('.form-group')?.querySelector('.chip-editor');
+      if (!editor || !meta) return;
+
+      const chip = document.createElement('span');
+      chip.className = 'chip-placeholder';
+      chip.setAttribute('contenteditable', 'false');
+      chip.dataset.code = code;
+      chip.textContent = meta.name;
+
+      editor.focus();
+      const sel = window.getSelection();
+      let range = null;
+      if (sel && sel.rangeCount && editor.contains(sel.getRangeAt(0).startContainer)) {
+        range = sel.getRangeAt(0);
+      }
+      if (range) {
+        range.deleteContents();
+        range.insertNode(chip);
+      } else {
+        editor.appendChild(chip);
+      }
+      // 插入后紧跟一个空格便于继续输入，并把光标移到胶囊之后
+      const space = document.createTextNode(' ');
+      if (chip.parentNode) chip.parentNode.insertBefore(space, chip.nextSibling);
+      const newRange = document.createRange();
+      newRange.setStartAfter(space);
+      newRange.collapse(true);
+      if (sel) { sel.removeAllRanges(); sel.addRange(newRange); }
+
+      markDirty(true);
     };
   });
 
@@ -2215,6 +2360,10 @@ function collectFormData() {
   document.querySelectorAll('[data-p]').forEach((el) => {
     const path = el.dataset.p;
     if (el.tagName === 'DIV' && el.hasAttribute('data-custom-select')) {
+      return;
+    }
+    if (el.classList && el.classList.contains('chip-editor')) {
+      setVal(path, editorHtmlToTemplate(el));
       return;
     }
     if (el.type === 'checkbox') {
@@ -2316,6 +2465,15 @@ async function saveConfig() {
       if (i >= 7 && (!sorted[i].desc || !sorted[i].desc.trim())) {
         throw new Error(`第 ${i + 1} 个分级 "${sorted[i].name}" 的人设描述为必填项`);
       }
+    }
+
+    // 校验动态提示词注入模板的占位符完整性
+    const promptTpl = getVal('advanced_config.dynamic_prompt_template', '');
+    const missingPlaceholders = DYNAMIC_PROMPT_PLACEHOLDERS
+      .filter((p) => !String(promptTpl).includes(p.code))
+      .map((p) => p.name);
+    if (missingPlaceholders.length) {
+      throw new Error(`动态提示词注入模板缺少占位符：${missingPlaceholders.join('、')}`);
     }
 
     const res = await apiPost('config', config);

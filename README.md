@@ -258,6 +258,25 @@ Bot 管理员身份沿用 AstrBot 对当前会话的判断。群主、群管理�
 | 好感度特使名单 `favour_envoys` | `[]` | 每项填一个用户 ID，享受特权初始好感；不赋予管理指令权限，也不保证免受冷暴力。 |
 | 全局会话黑名单 `blocked_sessions` | `[]` | 在普通对话的好感度上下文注入阶段排除命中的会话。 |
 | 全局会话白名单 `allowed_sessions` | `[]` | 留空时全部允许，非空时只处理匹配会话；黑名单优先。 |
+| 动态注入模板 `dynamic_prompt_template` | 见下 | 自定义每轮注入 `<FavourContext>` 的内容文本；必须完整保留全部占位符，否则保存失败。WebUI 中以胶囊形式展示占位符，点击即可插入。 |
+| 默认关系名称 `default_relationship` | `陌生人` | 用户尚无关系记录时，模板中 `{relationship}` 占位符渲染显示的内容。 |
+
+**动态注入模板占位符**
+
+| 占位符 | 含义 |
+| :--- | :--- |
+| `{user_name}` | 用户名（无昵称时回退为用户 UID） |
+| `{user_id}` | 用户 UID |
+| `{admin_status}` | 身份（Bot 管理员 / 群主 / 群管理员 / 普通用户） |
+| `{favour}` | 当前好感度数值 |
+| `{max_favour}` | 好感度上限 |
+| `{relationship}` | 关系名称（无关系记录时取 `default_relationship`） |
+| `{exclusive}` | 排他关系快照 |
+| `{rel_context}` | 会话关系表（含换行，未启用时为空） |
+| `{levels}` | 当前好感度等级规则 |
+| `{limit}` | 好感度上下限约束说明 |
+
+> 默认模板已将原歧义的「关系：{relationship}」改为「用户是你的{relationship}」，语义更明确。
 
 **名单怎么填？**
 

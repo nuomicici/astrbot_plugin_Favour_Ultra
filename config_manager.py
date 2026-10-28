@@ -10,7 +10,7 @@ import copy
 import shutil
 import traceback
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
 from astrbot.api import logger
@@ -124,6 +124,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "allowed_sessions": [],
         # 修改好感度指令的最低权限：superuser=仅Bot管理员, owner=群主及以上, admin=管理员及以上
         "modify_favour_permission": "admin",
+        # 动态提示词注入更改（每轮请求注入的 <FavourContext> 内容模板）
+        # 可用占位符：{user_name}=用户名, {user_id}=用户UID, {admin_status}=身份,
+        # {favour}=好感度, {max_favour}=好感上限, {relationship}=关系, {exclusive}=排他关系,
+        # {rel_context}=会话关系表, {levels}=等级规则, {limit}=上限约束
+        "dynamic_prompt_template": (
+            "用户:{user_name} | UID:{user_id} | 管理员:{admin_status} | 好感:{favour}/{max_favour} | "
+            "用户是你的{relationship}\n"
+            "排他关系:{exclusive}{rel_context}\n"
+            "等级:{levels}\n"
+            "限制:{limit}"
+        ),
+        # 无关系记录时 {relationship} 渲染显示的默认关系名称
+        "default_relationship": "陌生人",
     },
 
     # 冷暴力配置
@@ -149,6 +162,29 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 # 配置文件名
 CONFIG_FILENAME = "config.json"
 PLUGIN_NAME_FOR_CONFIG = "astrbot_plugin_favour_ultra"
+
+# 动态提示词注入模板支持的占位符。
+# 保存配置时要求模板中必须完整包含以下全部占位符。
+DYNAMIC_PROMPT_PLACEHOLDERS: Tuple[str, ...] = (
+    "{user_name}",
+    "{user_id}",
+    "{admin_status}",
+    "{favour}",
+    "{max_favour}",
+    "{relationship}",
+    "{exclusive}",
+    "{rel_context}",
+    "{levels}",
+    "{limit}",
+)
+
+
+def get_missing_dynamic_prompt_placeholders(template: str) -> List[str]:
+    """返回模板中缺失的必填占位符列表（按 DYNAMIC_PROMPT_PLACEHOLDERS 顺序）。"""
+    if not isinstance(template, str):
+        return list(DYNAMIC_PROMPT_PLACEHOLDERS)
+    missing = [p for p in DYNAMIC_PROMPT_PLACEHOLDERS if p not in template]
+    return missing
 
 
 class PluginConfigManager:
@@ -309,6 +345,24 @@ class PluginConfigManager:
         """加载配置后规范化所有可能的 JSON 编辑器字段。"""
         if "favour_levels" in config:
             config["favour_levels"] = self._normalize_favour_levels(config["favour_levels"])
+
+        # 动态提示词注入模板：为空或缺少占位符时回退默认模板，避免注入残缺或 KeyError。
+        adv_conf = config.get("advanced_config")
+        if isinstance(adv_conf, dict):
+            if not str(adv_conf.get("default_relationship") or "").strip():
+                adv_conf["default_relationship"] = DEFAULT_CONFIG["advanced_config"]["default_relationship"]
+            tpl = adv_conf.get("dynamic_prompt_template")
+            if not isinstance(tpl, str) or not tpl.strip():
+                adv_conf["dynamic_prompt_template"] = DEFAULT_CONFIG["advanced_config"]["dynamic_prompt_template"]
+                logger.info("[配置升级] 动态提示词注入模板为空，已使用默认模板。")
+            else:
+                missing = get_missing_dynamic_prompt_placeholders(tpl)
+                if missing:
+                    logger.warning(
+                        f"[配置升级] 动态提示词注入模板缺少占位符 {', '.join(missing)}，已尝试自动补齐缺失占位符。"
+                    )
+                    patch = "\n".join(missing)
+                    adv_conf["dynamic_prompt_template"] = tpl.rstrip() + "\n" + patch
         
         if "favour_decay" in config and isinstance(config["favour_decay"], dict):
             fd = config["favour_decay"]
@@ -469,6 +523,17 @@ class PluginConfigManager:
         if len(levels) < 3:
             logger.error("好感度分级至少需要3个，保存失败。")
             return False
+
+        # 验证动态提示词注入模板：必须保留全部占位符
+        adv = webui_config.get("advanced_config")
+        if isinstance(adv, dict) and "dynamic_prompt_template" in adv:
+            tpl = adv.get("dynamic_prompt_template")
+            missing = get_missing_dynamic_prompt_placeholders(tpl)
+            if missing:
+                logger.error(
+                    f"动态提示词注入模板缺少占位符: {', '.join(missing)}，保存失败。"
+                )
+                return False
 
         for i, lv in enumerate(levels):
             if i >= 7:  # 第8个起（index 7+）

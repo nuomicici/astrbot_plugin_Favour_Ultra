@@ -17,6 +17,12 @@
 ### beta (未发布) — 提示词精简实验
 - **系统提示词精简（仅 beta）**：删除 `<Rules>` 中与 `<FavorLog>` 重复的“数据以 FavourContext 为准”、压缩 `<RelationshipTags>` 的冗余说明与不可自查的次数限制、`<FavorLog>` 改用 `N` 注解、简化 GALGAME/REALISTIC 措辞
 - **注意**：本分支会改变 system_prompt，升级后对话缓存需重建；如需保留缓存请使用 `master` 分支
+- **新增「动态提示词注入更改」配置**（高级调节）：
+  - 新增 `advanced_config.dynamic_prompt_template`，可自定义每轮注入 `<FavourContext>` 的上下文内容文本
+  - 模板必须完整保留全部占位符（`{user_name}`/`{user_id}`/`{admin_status}`/`{favour}`/`{max_favour}`/`{relationship}`/`{exclusive}`/`{rel_context}`/`{levels}`/`{limit}`），保存时前后端双重校验，缺失占位符将拒绝保存并提示中文名称
+  - WebUI 中占位符以**胶囊**形式展示中文名称（如「用户名」「用户UID」「关系名称」），点击即可作为整体胶囊插入配置框，序列化时还原为占位符代码
+  - 默认模板将原歧义的「关系：{relationship}」改为「用户是你的{relationship}」，语义更明确
+- **新增「默认关系名称」配置**：`advanced_config.default_relationship`（默认 `陌生人`），用户尚无关系记录时 `{relationship}` 渲染显示该值（替代原先固定的「无」，不改动关系确认/存储逻辑）
 ### v4.4.11 (2026-10-27)
 - **新增自定义好感度判定模式与判定提示词**（[#29](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/29)）：
   - 判定模式 `favour_mode` 新增 `custom` 选项，配合新配置项 `favour_mode_custom_prompt` 可自由书写判定规则，注入 LLM 的 `<ScoringMode>` 段落
