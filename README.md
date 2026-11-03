@@ -272,7 +272,7 @@ Bot 管理员身份沿用 AstrBot 对当前会话的判断。群主、群管理�
 | `{max_favour}` | 好感度上限 |
 | `{relationship}` | 关系名称（无关系记录时取 `default_relationship`） |
 | `{exclusive}` | 排他关系快照 |
-| `{rel_context}` | 会话关系表（含换行，未启用时为空） |
+| `{rel_context}` | 会话关系表与本条消息提及（@）用户的好感度/关系信息（含换行，无内容时为空） |
 | `{levels}` | 当前好感度等级规则 |
 | `{limit}` | 好感度上下限约束说明 |
 

@@ -24,6 +24,13 @@
   - 默认模板将原歧义的「关系：{relationship}」改为「用户是你的{relationship}」，语义更明确
   - 默认模板将「管理员：{admin_status}」改为「身份：{admin_status}」，明确该字段表示用户在当前会话的权限身份（Bot管理员/群主/群管理员/普通用户）
 - **新增「默认关系名称」配置**：`advanced_config.default_relationship`（默认 `陌生人`），用户尚无关系记录时 `{relationship}` 渲染显示该值（替代原先固定的「无」，不改动关系确认/存储逻辑）
+- **修复全局好感度模式下主动搭话发送到无效会话的问题**（[#32](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/32)）：
+  - 全局模式下按当前适配器平台记录为 `platform:user_id`（如 `aiocqhttp:123456`），并在启动与读写时自动兼容/升级旧版纯适配器前缀记录
+  - 主动搭话调度时将全局记录拼接插入 `FriendMessage`（如 `aiocqhttp:FriendMessage:123456`）再构造合成事件或直接发送，修正 `AstrMessageEvent` 合成事件的 `session_id` 与 `unified_msg_origin`，避免将完整 UMO 重复拼接导致发送到无效会话
+- **修复 WebUI 可视化视图中已开启的开关点击关闭时无动画与状态未切换的问题**（[#33](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/33)）：
+  - 复选框切换时同步更新 `.switch-card` 的 `active` 类名，并修正 CSS 选择器使关闭状态与过渡动画正常生效
+- **支持将消息中被提及（@）用户的好感度与关系注入上下文**（[#34](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/34)）：
+  - 普通对话中检测到 `@` 提及非发话用户（自动排除 Bot 自身、发送者本人及全体成员）时，自动查询被提及用户的好感度、等级与关系并注入 `<FavourContext>` 的 `{rel_context}` 中，供模型在对话中保持对被提及用户的一致态度
 ### v4.4.11 (2026-10-27)
 - **新增自定义好感度判定模式与判定提示词**（[#29](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/29)）：
   - 判定模式 `favour_mode` 新增 `custom` 选项，配合新配置项 `favour_mode_custom_prompt` 可自由书写判定规则，注入 LLM 的 `<ScoringMode>` 段落

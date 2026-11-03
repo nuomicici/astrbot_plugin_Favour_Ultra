@@ -2225,6 +2225,12 @@ function bindTabEvents(tabKey) {
   // 监听输入改动
   document.querySelectorAll('#body input, #body textarea').forEach((el) => {
     el.oninput = el.onchange = () => {
+      if (el.type === 'checkbox') {
+        const card = el.nextElementSibling;
+        if (card && card.classList && card.classList.contains('switch-card')) {
+          card.classList.toggle('active', el.checked);
+        }
+      }
       markDirty(true);
       if (tabKey === 'levels') {
         collectFormData();

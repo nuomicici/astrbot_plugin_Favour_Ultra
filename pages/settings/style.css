@@ -770,13 +770,13 @@ body {
 }
 
 input[type="checkbox"]:checked + .switch-card .switch-ctrl,
-.switch-card.active .switch-ctrl {
+input[type="checkbox"]:checked + .switch-card.active .switch-ctrl {
   background: var(--primary);
   box-shadow: 0 0 10px var(--primary-glow);
 }
 
 input[type="checkbox"]:checked + .switch-card .switch-ctrl::after,
-.switch-card.active .switch-ctrl::after {
+input[type="checkbox"]:checked + .switch-card.active .switch-ctrl::after {
   transform: translateX(20px);
 }
 
