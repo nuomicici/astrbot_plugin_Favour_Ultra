@@ -152,6 +152,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         }
     },
 
+    # 自动备份配置
+    "backup": {
+        "enabled": True,
+        "interval_hours": 3,
+        "retention_hours": 24,
+    },
+
     # 会话完全同步：成对 UMO 双向同步好感度/关系/用户字段
     # 每项: {"a": "platform:type:id", "b": "webchat:FriendMessage:xxx", "enabled": true, "note": ""}
     "session_sync": {
@@ -473,6 +480,12 @@ class PluginConfigManager:
             for k in new_config["cold_violence_config"]:
                 if k in cv:
                     new_config["cold_violence_config"][k] = cv[k]
+
+        # 自动备份配置
+        if "backup" in old and isinstance(old["backup"], dict):
+            for k in new_config["backup"]:
+                if k in old["backup"]:
+                    new_config["backup"][k] = old["backup"][k]
 
         # 规范化所有 JSON 编辑器字段
         new_config = self._normalize_config_after_load(new_config)

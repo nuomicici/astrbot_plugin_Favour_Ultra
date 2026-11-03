@@ -54,20 +54,20 @@ class FavourManagerTool(Star):
         self.group_sort_by = self.config.get("group_sort_by", "default")
         self.enable_cold_violence = self.config.get("enable_cold_violence", True)
         self.enable_relationship_table = self.config.get("enable_relationship_table", True)
-        self.min_favour_value = self.config.get("min_favour_value", -100)
-        self.max_favour_value = self.config.get("max_favour_value", 100)
+        self.min_favour_value = self.config.get("min_favour_value", -200)
+        self.max_favour_value = self.config.get("max_favour_value", 1000)
         self.default_favour = self.config.get("default_favour", 0)
         self.favour_levels = self.config.get("favour_levels", [])
 
         # 高级配置
         adv_conf = self.config.get("advanced_config", {})
-        self.admin_default_favour = adv_conf.get("admin_default_favour") or 50
+        self.admin_default_favour = adv_conf.get("admin_default_favour") if adv_conf.get("admin_default_favour") is not None else 50
         self.favour_envoys = adv_conf.get("favour_envoys") or []
-        self.favour_increase_min = adv_conf.get("favour_increase_min") or 1
-        self.favour_increase_max = adv_conf.get("favour_increase_max") or 3
-        self.favour_decrease_min = adv_conf.get("favour_decrease_min") or 1
-        self.favour_decrease_max = adv_conf.get("favour_decrease_max") or 5
-        self.perm_level_threshold = adv_conf.get("level_threshold") or 50
+        self.favour_increase_min = adv_conf.get("favour_increase_min") if adv_conf.get("favour_increase_min") is not None else 1
+        self.favour_increase_max = adv_conf.get("favour_increase_max") if adv_conf.get("favour_increase_max") is not None else 3
+        self.favour_decrease_min = adv_conf.get("favour_decrease_min") if adv_conf.get("favour_decrease_min") is not None else 1
+        self.favour_decrease_max = adv_conf.get("favour_decrease_max") if adv_conf.get("favour_decrease_max") is not None else 5
+        self.perm_level_threshold = adv_conf.get("level_threshold") if adv_conf.get("level_threshold") is not None else 50
         self.blocked_sessions = adv_conf.get("blocked_sessions") or []
         self.allowed_sessions = adv_conf.get("allowed_sessions") or []
         self.modify_favour_permission = adv_conf.get("modify_favour_permission") or "admin"
@@ -77,7 +77,7 @@ class FavourManagerTool(Star):
         # 冷暴力配置
         cv_conf = self.config.get("cold_violence_config", {})
         self.cold_violence_consecutive_threshold = cv_conf.get("consecutive_decrease_threshold") or 3
-        self.cold_violence_duration_minutes = cv_conf.get("duration_minutes") or 60
+        self.cold_violence_duration_minutes = cv_conf.get("duration_minutes") or 30
         self.cold_violence_is_global = cv_conf.get("is_global", False)
         self.cold_violence_auto_blacklist = cv_conf.get("auto_blacklist_on_min", False)
         self.cold_violence_replies = cv_conf.get("replies", {
@@ -1182,7 +1182,9 @@ class FavourManagerTool(Star):
                         "last_interaction": r.last_interaction.isoformat() if r.last_interaction else ""
                     }
                     if self._is_shared_session(r.session_id):
-                        base["session_id"] = r.session_id
+                        sid = r.session_id or "global"
+                        base["session_id"] = sid
+                        base["platform"] = sid.split(":", 1)[0] if ":" in sid else sid
                         global_list.append(base)
                     else:
                         parts = r.session_id.split(":", 2)
@@ -1581,19 +1583,19 @@ class FavourManagerTool(Star):
         self.group_sort_by = cfg.get("group_sort_by", "default")
         self.enable_cold_violence = cfg.get("enable_cold_violence", True)
         self.enable_relationship_table = cfg.get("enable_relationship_table", True)
-        self.min_favour_value = cfg.get("min_favour_value", -100)
-        self.max_favour_value = cfg.get("max_favour_value", 100)
+        self.min_favour_value = cfg.get("min_favour_value", -200)
+        self.max_favour_value = cfg.get("max_favour_value", 1000)
         self.default_favour = cfg.get("default_favour", 0)
         self.favour_levels = cfg.get("favour_levels", [])
 
         adv = cfg.get("advanced_config", {})
-        self.admin_default_favour = adv.get("admin_default_favour") or 50
+        self.admin_default_favour = adv.get("admin_default_favour") if adv.get("admin_default_favour") is not None else 50
         self.favour_envoys = adv.get("favour_envoys") or []
-        self.favour_increase_min = adv.get("favour_increase_min") or 1
-        self.favour_increase_max = adv.get("favour_increase_max") or 3
-        self.favour_decrease_min = adv.get("favour_decrease_min") or 1
-        self.favour_decrease_max = adv.get("favour_decrease_max") or 5
-        self.perm_level_threshold = adv.get("level_threshold") or 50
+        self.favour_increase_min = adv.get("favour_increase_min") if adv.get("favour_increase_min") is not None else 1
+        self.favour_increase_max = adv.get("favour_increase_max") if adv.get("favour_increase_max") is not None else 3
+        self.favour_decrease_min = adv.get("favour_decrease_min") if adv.get("favour_decrease_min") is not None else 1
+        self.favour_decrease_max = adv.get("favour_decrease_max") if adv.get("favour_decrease_max") is not None else 5
+        self.perm_level_threshold = adv.get("level_threshold") if adv.get("level_threshold") is not None else 50
         self.blocked_sessions = adv.get("blocked_sessions") or []
         self.allowed_sessions = adv.get("allowed_sessions") or []
         self.modify_favour_permission = adv.get("modify_favour_permission") or "admin"
@@ -1602,7 +1604,7 @@ class FavourManagerTool(Star):
 
         cv = cfg.get("cold_violence_config", {})
         self.cold_violence_consecutive_threshold = cv.get("consecutive_decrease_threshold") or 3
-        self.cold_violence_duration_minutes = cv.get("duration_minutes") or 60
+        self.cold_violence_duration_minutes = cv.get("duration_minutes") or 30
         self.cold_violence_is_global = cv.get("is_global", False)
         self.cold_violence_auto_blacklist = cv.get("auto_blacklist_on_min", False)
         self.cold_violence_replies = cv.get("replies", self.cold_violence_replies)

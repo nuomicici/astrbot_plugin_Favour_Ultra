@@ -11,7 +11,7 @@ let isDirtyState = false;
 // ==================== Bridge 桥接与 API 请求封装 ====================
 
 function getBridge() {
-  return window.AstrBotPluginPage || null;
+  return window.AstrBotPluginView || window.AstrBotPluginPage || null;
 }
 
 async function waitForBridge(timeoutMs = 3000) {
@@ -457,7 +457,7 @@ const DYNAMIC_PROMPT_PLACEHOLDERS = [
   { code: '{max_favour}', name: '好感上限' },
   { code: '{relationship}', name: '关系名称' },
   { code: '{exclusive}', name: '排他关系' },
-  { code: '{rel_context}', name: '会话关系表' },
+  { code: '{rel_context}', name: '关系表与@提及' },
   { code: '{levels}', name: '等级规则' },
   { code: '{limit}', name: '上限约束' },
 ];
@@ -536,7 +536,7 @@ function uiChipEditor({ path, label, hint = '' }) {
 function uiStringList({ path, label, placeholder = '输入项...' }) {
   const list = getVal(path, []);
   return `
-    <div class="form-group full">
+    <div class="form-group full" data-string-list="${path}">
       <label class="form-label">${label}</label>
       <div class="dyn-list-container">
         ${list.map((item, idx) => `
@@ -621,12 +621,12 @@ function renderBasicTab() {
             ${uiSwitch({
               path: 'is_global_favour',
               label: '全局好感度模式',
-              desc: '开启后所有群聊与私聊共享同一个好感度数值'
+              desc: '开启后按适配器平台共享好感度（如 aiocqhttp:UID），搭话时自动拼接 FriendMessage 发起私聊'
             })}
             ${uiSwitch({
               path: 'enable_relationship_table',
               label: '向 LLM 注入关系表',
-              desc: '在系统提示中动态插入当前会话用户关系状态'
+              desc: '在上下文中动态插入当前会话用户关系表（消息中被 @ 提及的用户好感会自动注入）'
             })}
             ${uiSwitch({
               path: 'enable_cold_violence',
@@ -1291,7 +1291,16 @@ function updateDataStats() {
     if (minEl) minEl.textContent = '0';
   }
 
-  const sessions = new Set(all.map((r) => r.session_id));
+  const sessions = new Set(
+    all.map((r) => {
+      const sid = String(r.session_id || 'global');
+      const colonCount = (sid.match(/:/g) || []).length;
+      if (colonCount < 2 && sid !== 'global') {
+        return sid.split(':')[0];
+      }
+      return sid;
+    })
+  );
   if (sessEl) sessEl.textContent = sessions.size;
 }
 
@@ -1325,15 +1334,26 @@ function renderDataRecords() {
 
   const folders = [];
 
-  // --- A. 全局数据折叠卡片 ---
+  // --- A. 全局数据折叠卡片（按适配器平台分组） ---
   if (gl.length > 0 && (_dataFilterType === 'all' || _dataFilterType === 'global')) {
-    folders.push({
-      key: 'folder_global',
-      type: 'global',
-      title: '全局好感度数据',
-      subtitle: '跨群与跨私聊共享数据',
-      platform: '全局',
-      rows: gl
+    const globalByPlat = {};
+    gl.forEach((r) => {
+      const sid = String(r.session_id || 'global');
+      const plat = r.platform || (sid.includes(':') ? sid.split(':')[0] : sid) || 'global';
+      if (!globalByPlat[plat]) globalByPlat[plat] = [];
+      globalByPlat[plat].push(r);
+    });
+    Object.keys(globalByPlat).sort().forEach((plat) => {
+      const platRows = globalByPlat[plat];
+      const isLegacyGlobal = plat === 'global';
+      folders.push({
+        key: `folder_global_${plat}`,
+        type: 'global',
+        title: isLegacyGlobal ? '全局好感度数据 (旧版共享池)' : `${plat} · 平台全局好感度数据`,
+        subtitle: isLegacyGlobal ? '跨平台旧版 global 共享数据' : `适配器 ${plat} 内跨群与跨私聊共享 (${plat}:UID)`,
+        platform: isLegacyGlobal ? '全局' : plat,
+        rows: platRows
+      });
     });
   }
 
@@ -1473,7 +1493,7 @@ function renderDataRecords() {
                   <th>好感度数值</th>
                   <th>关系称号</th>
                   <th style="text-align:center">唯一关系</th>
-                  ${f.type === 'private' ? '<th>私聊会话 UMO</th>' : ''}
+                  ${f.type === 'private' ? '<th>私聊会话 UMO</th>' : f.type === 'global' ? '<th>平台全局标识</th>' : ''}
                   <th style="text-align:right">操作</th>
                 </tr>
               </thead>
@@ -1504,6 +1524,10 @@ function renderDataRecords() {
           ${f.type === 'private' ? `
             <td style="font-family:ui-monospace,monospace;font-size:0.75rem;color:var(--text-dim)" title="${escapeHtml(r.session_id)}">
               ${escapeHtml(r.session_id.split(':').slice(-1)[0] || r.session_id)}
+            </td>
+          ` : f.type === 'global' ? `
+            <td style="font-family:ui-monospace,monospace;font-size:0.75rem;color:var(--text-dim)" title="${escapeHtml(r.session_id)}">
+              ${escapeHtml(r.session_id)}
             </td>
           ` : ''}
           <td style="text-align:right;white-space:nowrap">
@@ -2068,6 +2092,32 @@ async function loadBackupsList() {
     const data = await apiGet('backups');
     const list = data.backups || [];
 
+    // 同步后端返回的备份配置（防旧版 config.json 缺少 backup 顶级键）
+    if (data.config && typeof data.config === 'object') {
+      if (!config.backup || typeof config.backup !== 'object') {
+        config.backup = {};
+      }
+      if (config.backup.enabled === undefined) {
+        config.backup.enabled = Boolean(data.config.enabled);
+        const sw = document.getElementById('sw-backup-enabled');
+        if (sw) {
+          sw.checked = config.backup.enabled;
+          const card = sw.nextElementSibling;
+          if (card && card.classList) card.classList.toggle('active', sw.checked);
+        }
+      }
+      if (config.backup.interval_hours == null && data.config.interval_hours != null) {
+        config.backup.interval_hours = data.config.interval_hours;
+        const inp = document.querySelector('input[data-p="backup.interval_hours"]');
+        if (inp) inp.value = data.config.interval_hours;
+      }
+      if (config.backup.retention_hours == null && data.config.retention_hours != null) {
+        config.backup.retention_hours = data.config.retention_hours;
+        const inp = document.querySelector('input[data-p="backup.retention_hours"]');
+        if (inp) inp.value = data.config.retention_hours;
+      }
+    }
+
     if (!list.length) {
       view.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem;text-align:center;padding:20px;">暂无备份文件</div>';
       return;
@@ -2355,8 +2405,13 @@ function bindTabEvents(tabKey) {
         const idx = +btn.dataset.idx;
         const list = getVal(path, []);
         list.splice(idx, 1);
+        setVal(path, list);
         markDirty(true);
-        renderTab(currentTabName());
+        // 直接渲染避免被后续空收集忽略
+        const bodyEl = document.getElementById('body');
+        if (bodyEl) {
+          renderTab(currentTabName());
+        }
       }
     };
   });
@@ -2392,8 +2447,12 @@ function collectFormData() {
     }
   });
 
-  // 收集字符串数组
+  // 收集字符串数组（包含清空后的空数组）
   const listGroups = {};
+  document.querySelectorAll('[data-string-list]').forEach((container) => {
+    const path = container.dataset.stringList;
+    if (path) listGroups[path] = [];
+  });
   document.querySelectorAll('[data-list-p]').forEach((el) => {
     const path = el.dataset.listP;
     if (!listGroups[path]) listGroups[path] = [];
@@ -2416,7 +2475,7 @@ function collectFormData() {
         desc: document.getElementById('lv-desc-' + i)?.value || '',
       });
     }
-    if (levels.length) setVal('favour_levels', levels);
+    setVal('favour_levels', levels);
   } else if (tab === 'decay' && getVal('favour_decay.mode') === 'advanced') {
     const advs = [];
     for (let i = 0; ; i++) {
@@ -2431,7 +2490,7 @@ function collectFormData() {
         floor: floorVal === '' ? null : parseInt(floorVal) || 0,
       });
     }
-    if (advs.length) setVal('favour_decay.advanced_rules', advs);
+    setVal('favour_decay.advanced_rules', advs);
   } else if (tab === 'active') {
     const acts = [];
     for (let i = 0; ; i++) {
@@ -2443,7 +2502,7 @@ function collectFormData() {
         probability: parseInt(document.getElementById('act-prob-' + i)?.value) || 0,
       });
     }
-    if (acts.length) setVal('active_chat.rules', acts);
+    setVal('active_chat.rules', acts);
   }
 }
 
@@ -2503,10 +2562,20 @@ async function saveConfig() {
 async function startApp() {
   setupNavTabs();
   const bridge = await waitForBridge(3000);
-  if (bridge && typeof bridge.onContext === 'function') {
-    bridge.onContext((ctx) => {
-      // 监听主题或语言上下文
-    });
+  const applyThemeFromContext = (ctx) => {
+    if (ctx && typeof ctx.isDark === 'boolean') {
+      document.documentElement.setAttribute('data-theme', ctx.isDark ? 'dark' : 'light');
+    }
+  };
+  if (bridge) {
+    if (typeof bridge.getContext === 'function') {
+      applyThemeFromContext(bridge.getContext());
+    }
+    if (typeof bridge.onContext === 'function') {
+      bridge.onContext((ctx) => {
+        applyThemeFromContext(ctx);
+      });
+    }
   }
   await init();
 }
