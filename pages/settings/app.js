@@ -11,7 +11,7 @@ let isDirtyState = false;
 // ==================== Bridge 桥接与 API 请求封装 ====================
 
 function getBridge() {
-  return window.AstrBotPluginPage || null;
+  return window.AstrBotPluginView || window.AstrBotPluginPage || null;
 }
 
 async function waitForBridge(timeoutMs = 3000) {
@@ -448,10 +448,95 @@ function uiTextarea({ path, label, rows = 4, hint = '', placeholder = '', pills 
   `;
 }
 
+// 动态提示词占位符（代码 → 中文名）
+const DYNAMIC_PROMPT_PLACEHOLDERS = [
+  { code: '{user_name}', name: '用户名' },
+  { code: '{user_id}', name: '用户UID' },
+  { code: '{admin_status}', name: '身份' },
+  { code: '{favour}', name: '好感度' },
+  { code: '{max_favour}', name: '好感上限' },
+  { code: '{relationship}', name: '关系名称' },
+  { code: '{exclusive}', name: '排他关系' },
+  { code: '{rel_context}', name: '关系表与@提及' },
+  { code: '{levels}', name: '等级规则' },
+  { code: '{limit}', name: '上限约束' },
+];
+
+// 将含占位符的模板字符串反序列化为富文本 HTML（占位符转为胶囊）
+function templateToEditorHtml(template) {
+  const text = template == null ? '' : String(template);
+  const codes = DYNAMIC_PROMPT_PLACEHOLDERS.map((p) => p.code);
+  const nameOf = {};
+  DYNAMIC_PROMPT_PLACEHOLDERS.forEach((p) => { nameOf[p.code] = p.name; });
+  let out = '';
+  let i = 0;
+  const plainBuf = [];
+  const flushPlain = () => {
+    if (plainBuf.length) {
+      out += escapeHtml(plainBuf.join('')).replace(/\n/g, '<br>');
+      plainBuf.length = 0;
+    }
+  };
+  while (i < text.length) {
+    let matched = null;
+    for (const code of codes) {
+      if (text.startsWith(code, i)) { matched = code; break; }
+    }
+    if (matched) {
+      flushPlain();
+      out += `<span class="chip-placeholder" contenteditable="false" data-code="${escapeHtml(matched)}">${escapeHtml(nameOf[matched])}</span>`;
+      i += matched.length;
+    } else {
+      plainBuf.push(text[i]);
+      i += 1;
+    }
+  }
+  flushPlain();
+  return out;
+}
+
+// 从富文本编辑器读取内容，胶囊还原为占位符代码，换行转换为 \n
+function editorHtmlToTemplate(editorEl) {
+  const parts = [];
+  const walk = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      parts.push(node.nodeValue);
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node;
+      if (el.classList && el.classList.contains('chip-placeholder')) {
+        parts.push(el.dataset.code || '');
+        return;
+      }
+      if (el.tagName === 'BR') { parts.push('\n'); return; }
+      for (const child of el.childNodes) walk(child);
+      if (el.tagName === 'DIV' || el.tagName === 'P') { parts.push('\n'); }
+    }
+  };
+  for (const child of editorEl.childNodes) walk(child);
+  return parts.join('').replace(/\n+$/, '');
+}
+
+function uiChipEditor({ path, label, hint = '' }) {
+  const val = getVal(path, '');
+  const html = templateToEditorHtml(val);
+  return `
+    <div class="form-group full">
+      <label class="form-label">
+        <span>${label}</span>
+        ${hint ? `<span class="form-label-hint">${hint}</span>` : ''}
+      </label>
+      <div class="chip-editor" data-p="${path}" contenteditable="true" spellcheck="false">${html}</div>
+      <div class="pill-group">
+        ${DYNAMIC_PROMPT_PLACEHOLDERS.map((p) => `<span class="pill-tag" data-chip-insert="${escapeHtml(p.code)}" title="${escapeHtml(p.name)} (${escapeHtml(p.code)})">+ ${escapeHtml(p.name)}</span>`).join('')}
+      </div>
+    </div>
+  `;
+}
+
 function uiStringList({ path, label, placeholder = '输入项...' }) {
   const list = getVal(path, []);
   return `
-    <div class="form-group full">
+    <div class="form-group full" data-string-list="${path}">
       <label class="form-label">${label}</label>
       <div class="dyn-list-container">
         ${list.map((item, idx) => `
@@ -536,12 +621,12 @@ function renderBasicTab() {
             ${uiSwitch({
               path: 'is_global_favour',
               label: '全局好感度模式',
-              desc: '开启后所有群聊与私聊共享同一个好感度数值'
+              desc: '开启后按适配器平台共享好感度（如 aiocqhttp:UID），搭话时自动拼接 FriendMessage 发起私聊'
             })}
             ${uiSwitch({
               path: 'enable_relationship_table',
               label: '向 LLM 注入关系表',
-              desc: '在系统提示中动态插入当前会话用户关系状态'
+              desc: '在上下文中动态插入当前会话用户关系表（消息中被 @ 提及的用户好感会自动注入）'
             })}
             ${uiSwitch({
               path: 'enable_cold_violence',
@@ -911,6 +996,23 @@ function renderAdvTab() {
       })}
 
       ${uiBentoCard({
+        title: '动态提示词注入更改',
+        desc: '自定义每轮注入给模型的好感度上下文内容；点击下方胶囊将其插入到配置框',
+        fullWidth: true,
+        iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+        content: `
+          ${uiChipEditor({
+            path: 'advanced_config.dynamic_prompt_template',
+            label: '动态注入模板',
+            hint: '必须完整包含全部占位符，否则无法保存'
+          })}
+          <div class="form-row" style="margin-top:12px;">
+            ${uiInput({ path: 'advanced_config.default_relationship', label: '默认关系名称', hint: '用户尚无关系记录时，{relationship} 显示的内容', placeholder: '陌生人' })}
+          </div>
+        `
+      })}
+
+      ${uiBentoCard({
         title: '管理与群等级阈值',
         desc: '特权与初始好感配置',
         iconSvg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/></svg>',
@@ -1189,7 +1291,16 @@ function updateDataStats() {
     if (minEl) minEl.textContent = '0';
   }
 
-  const sessions = new Set(all.map((r) => r.session_id));
+  const sessions = new Set(
+    all.map((r) => {
+      const sid = String(r.session_id || 'global');
+      const colonCount = (sid.match(/:/g) || []).length;
+      if (colonCount < 2 && sid !== 'global') {
+        return sid.split(':')[0];
+      }
+      return sid;
+    })
+  );
   if (sessEl) sessEl.textContent = sessions.size;
 }
 
@@ -1223,15 +1334,26 @@ function renderDataRecords() {
 
   const folders = [];
 
-  // --- A. 全局数据折叠卡片 ---
+  // --- A. 全局数据折叠卡片（按适配器平台分组） ---
   if (gl.length > 0 && (_dataFilterType === 'all' || _dataFilterType === 'global')) {
-    folders.push({
-      key: 'folder_global',
-      type: 'global',
-      title: '全局好感度数据',
-      subtitle: '跨群与跨私聊共享数据',
-      platform: '全局',
-      rows: gl
+    const globalByPlat = {};
+    gl.forEach((r) => {
+      const sid = String(r.session_id || 'global');
+      const plat = r.platform || (sid.includes(':') ? sid.split(':')[0] : sid) || 'global';
+      if (!globalByPlat[plat]) globalByPlat[plat] = [];
+      globalByPlat[plat].push(r);
+    });
+    Object.keys(globalByPlat).sort().forEach((plat) => {
+      const platRows = globalByPlat[plat];
+      const isLegacyGlobal = plat === 'global';
+      folders.push({
+        key: `folder_global_${plat}`,
+        type: 'global',
+        title: isLegacyGlobal ? '全局好感度数据 (旧版共享池)' : `${plat} · 平台全局好感度数据`,
+        subtitle: isLegacyGlobal ? '跨平台旧版 global 共享数据' : `适配器 ${plat} 内跨群与跨私聊共享 (${plat}:UID)`,
+        platform: isLegacyGlobal ? '全局' : plat,
+        rows: platRows
+      });
     });
   }
 
@@ -1371,7 +1493,7 @@ function renderDataRecords() {
                   <th>好感度数值</th>
                   <th>关系称号</th>
                   <th style="text-align:center">唯一关系</th>
-                  ${f.type === 'private' ? '<th>私聊会话 UMO</th>' : ''}
+                  ${f.type === 'private' ? '<th>私聊会话 UMO</th>' : f.type === 'global' ? '<th>平台全局标识</th>' : ''}
                   <th style="text-align:right">操作</th>
                 </tr>
               </thead>
@@ -1402,6 +1524,10 @@ function renderDataRecords() {
           ${f.type === 'private' ? `
             <td style="font-family:ui-monospace,monospace;font-size:0.75rem;color:var(--text-dim)" title="${escapeHtml(r.session_id)}">
               ${escapeHtml(r.session_id.split(':').slice(-1)[0] || r.session_id)}
+            </td>
+          ` : f.type === 'global' ? `
+            <td style="font-family:ui-monospace,monospace;font-size:0.75rem;color:var(--text-dim)" title="${escapeHtml(r.session_id)}">
+              ${escapeHtml(r.session_id)}
             </td>
           ` : ''}
           <td style="text-align:right;white-space:nowrap">
@@ -1966,6 +2092,32 @@ async function loadBackupsList() {
     const data = await apiGet('backups');
     const list = data.backups || [];
 
+    // 同步后端返回的备份配置（防旧版 config.json 缺少 backup 顶级键）
+    if (data.config && typeof data.config === 'object') {
+      if (!config.backup || typeof config.backup !== 'object') {
+        config.backup = {};
+      }
+      if (config.backup.enabled === undefined) {
+        config.backup.enabled = Boolean(data.config.enabled);
+        const sw = document.getElementById('sw-backup-enabled');
+        if (sw) {
+          sw.checked = config.backup.enabled;
+          const card = sw.nextElementSibling;
+          if (card && card.classList) card.classList.toggle('active', sw.checked);
+        }
+      }
+      if (config.backup.interval_hours == null && data.config.interval_hours != null) {
+        config.backup.interval_hours = data.config.interval_hours;
+        const inp = document.querySelector('input[data-p="backup.interval_hours"]');
+        if (inp) inp.value = data.config.interval_hours;
+      }
+      if (config.backup.retention_hours == null && data.config.retention_hours != null) {
+        config.backup.retention_hours = data.config.retention_hours;
+        const inp = document.querySelector('input[data-p="backup.retention_hours"]');
+        if (inp) inp.value = data.config.retention_hours;
+      }
+    }
+
     if (!list.length) {
       view.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem;text-align:center;padding:20px;">暂无备份文件</div>';
       return;
@@ -2123,12 +2275,23 @@ function bindTabEvents(tabKey) {
   // 监听输入改动
   document.querySelectorAll('#body input, #body textarea').forEach((el) => {
     el.oninput = el.onchange = () => {
+      if (el.type === 'checkbox') {
+        const card = el.nextElementSibling;
+        if (card && card.classList && card.classList.contains('switch-card')) {
+          card.classList.toggle('active', el.checked);
+        }
+      }
       markDirty(true);
       if (tabKey === 'levels') {
         collectFormData();
         updateLevelSpectrum();
       }
     };
+  });
+
+  // 胶囊编辑器输入监听
+  document.querySelectorAll('#body .chip-editor').forEach((el) => {
+    el.oninput = () => markDirty(true);
   });
 
   // 占位符药丸插入事件
@@ -2145,6 +2308,44 @@ function bindTabEvents(tabKey) {
         textarea.selectionStart = textarea.selectionEnd = start + code.length;
         markDirty(true);
       }
+    };
+  });
+
+  // 胶囊编辑器：药丸点击后以胶囊形态插入到配置框
+  document.querySelectorAll('.pill-tag[data-chip-insert]').forEach((pill) => {
+    pill.onclick = () => {
+      const code = pill.dataset.chipInsert;
+      const meta = DYNAMIC_PROMPT_PLACEHOLDERS.find((p) => p.code === code);
+      const editor = pill.closest('.form-group')?.querySelector('.chip-editor');
+      if (!editor || !meta) return;
+
+      const chip = document.createElement('span');
+      chip.className = 'chip-placeholder';
+      chip.setAttribute('contenteditable', 'false');
+      chip.dataset.code = code;
+      chip.textContent = meta.name;
+
+      editor.focus();
+      const sel = window.getSelection();
+      let range = null;
+      if (sel && sel.rangeCount && editor.contains(sel.getRangeAt(0).startContainer)) {
+        range = sel.getRangeAt(0);
+      }
+      if (range) {
+        range.deleteContents();
+        range.insertNode(chip);
+      } else {
+        editor.appendChild(chip);
+      }
+      // 插入后紧跟一个空格便于继续输入，并把光标移到胶囊之后
+      const space = document.createTextNode(' ');
+      if (chip.parentNode) chip.parentNode.insertBefore(space, chip.nextSibling);
+      const newRange = document.createRange();
+      newRange.setStartAfter(space);
+      newRange.collapse(true);
+      if (sel) { sel.removeAllRanges(); sel.addRange(newRange); }
+
+      markDirty(true);
     };
   });
 
@@ -2204,8 +2405,13 @@ function bindTabEvents(tabKey) {
         const idx = +btn.dataset.idx;
         const list = getVal(path, []);
         list.splice(idx, 1);
+        setVal(path, list);
         markDirty(true);
-        renderTab(currentTabName());
+        // 直接渲染避免被后续空收集忽略
+        const bodyEl = document.getElementById('body');
+        if (bodyEl) {
+          renderTab(currentTabName());
+        }
       }
     };
   });
@@ -2215,6 +2421,10 @@ function collectFormData() {
   document.querySelectorAll('[data-p]').forEach((el) => {
     const path = el.dataset.p;
     if (el.tagName === 'DIV' && el.hasAttribute('data-custom-select')) {
+      return;
+    }
+    if (el.classList && el.classList.contains('chip-editor')) {
+      setVal(path, editorHtmlToTemplate(el));
       return;
     }
     if (el.type === 'checkbox') {
@@ -2237,8 +2447,12 @@ function collectFormData() {
     }
   });
 
-  // 收集字符串数组
+  // 收集字符串数组（包含清空后的空数组）
   const listGroups = {};
+  document.querySelectorAll('[data-string-list]').forEach((container) => {
+    const path = container.dataset.stringList;
+    if (path) listGroups[path] = [];
+  });
   document.querySelectorAll('[data-list-p]').forEach((el) => {
     const path = el.dataset.listP;
     if (!listGroups[path]) listGroups[path] = [];
@@ -2261,7 +2475,7 @@ function collectFormData() {
         desc: document.getElementById('lv-desc-' + i)?.value || '',
       });
     }
-    if (levels.length) setVal('favour_levels', levels);
+    setVal('favour_levels', levels);
   } else if (tab === 'decay' && getVal('favour_decay.mode') === 'advanced') {
     const advs = [];
     for (let i = 0; ; i++) {
@@ -2276,7 +2490,7 @@ function collectFormData() {
         floor: floorVal === '' ? null : parseInt(floorVal) || 0,
       });
     }
-    if (advs.length) setVal('favour_decay.advanced_rules', advs);
+    setVal('favour_decay.advanced_rules', advs);
   } else if (tab === 'active') {
     const acts = [];
     for (let i = 0; ; i++) {
@@ -2288,7 +2502,7 @@ function collectFormData() {
         probability: parseInt(document.getElementById('act-prob-' + i)?.value) || 0,
       });
     }
-    if (acts.length) setVal('active_chat.rules', acts);
+    setVal('active_chat.rules', acts);
   }
 }
 
@@ -2318,6 +2532,15 @@ async function saveConfig() {
       }
     }
 
+    // 校验动态提示词注入模板的占位符完整性
+    const promptTpl = getVal('advanced_config.dynamic_prompt_template', '');
+    const missingPlaceholders = DYNAMIC_PROMPT_PLACEHOLDERS
+      .filter((p) => !String(promptTpl).includes(p.code))
+      .map((p) => p.name);
+    if (missingPlaceholders.length) {
+      throw new Error(`动态提示词注入模板缺少占位符：${missingPlaceholders.join('、')}`);
+    }
+
     const res = await apiPost('config', config);
     if (res.success) {
       originalConfig = deepClone(config);
@@ -2339,10 +2562,20 @@ async function saveConfig() {
 async function startApp() {
   setupNavTabs();
   const bridge = await waitForBridge(3000);
-  if (bridge && typeof bridge.onContext === 'function') {
-    bridge.onContext((ctx) => {
-      // 监听主题或语言上下文
-    });
+  const applyThemeFromContext = (ctx) => {
+    if (ctx && typeof ctx.isDark === 'boolean') {
+      document.documentElement.setAttribute('data-theme', ctx.isDark ? 'dark' : 'light');
+    }
+  };
+  if (bridge) {
+    if (typeof bridge.getContext === 'function') {
+      applyThemeFromContext(bridge.getContext());
+    }
+    if (typeof bridge.onContext === 'function') {
+      bridge.onContext((ctx) => {
+        applyThemeFromContext(ctx);
+      });
+    }
   }
   await init();
 }

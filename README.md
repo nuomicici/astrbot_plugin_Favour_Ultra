@@ -3,18 +3,18 @@
 
 # 可自定义好感度系统 (Favour Ultra)
 
-[![当前版本](https://img.shields.io/badge/当前版本v4.4.11-blue?style=for-the-badge)](CHANGELOG.md)
+[![当前版本](https://img.shields.io/badge/当前版本v4.4.12-blue?style=for-the-badge)](CHANGELOG.md)
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
 <div align="left" style="width:70%">
 
-最新动态 (2026-10-25)
+最新动态 (2026-11-04)
 
+* **动态注入与提及感知 (v4.4.12)**：新增胶囊化动态提示词注入模板与默认关系名称；支持自动识别消息中被 `@` 提及用户的好感度与关系注入上下文（#34）；全局好感度改为 `platform:UID` 并修复全局主动搭话 UMO 拼接问题（#32）；修复 WebUI 开关关闭动画与配置同步问题（#33）
 * **自定义判定模式 (v4.4.11)**：判定模式新增 `custom`，配合 `favour_mode_custom_prompt` 可自由书写判定提示词，WebUI 选择自定义后即时展开编辑框
 * **修复跨夜搭话时段 (v4.4.10)**：`time_start` 晚于 `time_end` 时按跨夜时段判定（如 `16:00`-`09:30`），修复夜间时段失效问题
 * **主动搭话扩充 (v4.4.9)**：新增白名单用户（跨会话触发）、全局范围开关（仅私信/仅群聊/全部）、群聊自动 @ 功能；修复合成事件管线好感度标签外泄；WebUI 同步更新
-* **完善搭话功能 (v4.4.8)**：添加多个配置项、对群组/私聊环境进行分段适配
 * **必看！**：如果后台显示“无法识别好感度标签”，请先尝试在预设对话中添加如下内容并清空历史对话记录！（若无效请前往反馈）
 ```
 - 你好！
@@ -129,11 +129,11 @@ git clone https://github.com/nuomicici/astrbot_plugin_Favour_Ultra
 | 好感度下限 `min_favour_value` | `-200` | 好感度数值的最低边界。 |
 | 好感度上限 `max_favour_value` | `1000` | 好感度数值的最高边界，建议与等级区间配合设置。 |
 | 新用户初始好感 `default_favour` | `0` | 无可继承共享记录、也无特权身份的新用户初始值；不会批量重置已有数据。 |
-| 全局好感度模式 `is_global_favour` | 关闭 | 关闭时按会话独立保存；开启时，同一适配器前缀下的群聊和私聊共享同一用户的数据，跨前缀仍分别保存。 |
-| 向 LLM 注入关系表 `enable_relationship_table` | 开启 | 向模型补充当前会话的用户关系状态。 |
+| 全局好感度模式 `is_global_favour` | 关闭 | 关闭时按会话独立保存；开启时，同一适配器平台下的群聊和私聊共享同一用户的数据（记录为 `platform:user_id`，主动搭话时自动拼接 `FriendMessage` 发起私聊）。 |
+| 向 LLM 注入关系表 `enable_relationship_table` | 开启 | 向模型补充当前会话的用户关系状态；消息中被 `@` 提及的其他用户好感度与关系也会自动注入上下文。 |
 | 冷暴力系统总开关 `enable_cold_violence` | 开启 | 控制连续降低好感度触发的冷暴力机制，具体参数见「冷暴力」Tab。 |
 
-**共享模式说明**：独立会话键形如 `aiocqhttp:GroupMessage:123456`，共享记录键则形如 `aiocqhttp`。切换模式改变的是使用哪组记录，不会自动把所有独立会话合并；新记录会尝试继承已有共享好感。需要转移既有记录时，使用「迁移同步」。
+**共享模式说明**：独立会话键形如 `aiocqhttp:GroupMessage:123456`，平台全局共享记录键形如 `aiocqhttp:123456`（兼容旧版 `aiocqhttp` 并自动升级）。切换模式改变的是使用哪组记录，不会自动把所有独立会话合并；新记录会尝试继承已有共享好感。需要转移既有记录时，使用「迁移同步」。
 
 <a id="tab-levels"></a>
 #### 2. 好感分级
@@ -258,6 +258,25 @@ Bot 管理员身份沿用 AstrBot 对当前会话的判断。群主、群管理�
 | 好感度特使名单 `favour_envoys` | `[]` | 每项填一个用户 ID，享受特权初始好感；不赋予管理指令权限，也不保证免受冷暴力。 |
 | 全局会话黑名单 `blocked_sessions` | `[]` | 在普通对话的好感度上下文注入阶段排除命中的会话。 |
 | 全局会话白名单 `allowed_sessions` | `[]` | 留空时全部允许，非空时只处理匹配会话；黑名单优先。 |
+| 动态注入模板 `dynamic_prompt_template` | 见下 | 自定义每轮注入 `<FavourContext>` 的内容文本；必须完整保留全部占位符，否则保存失败。WebUI 中以胶囊形式展示占位符，点击即可插入。 |
+| 默认关系名称 `default_relationship` | `陌生人` | 用户尚无关系记录时，模板中 `{relationship}` 占位符渲染显示的内容。 |
+
+**动态注入模板占位符**
+
+| 占位符 | 含义 |
+| :--- | :--- |
+| `{user_name}` | 用户名（无昵称时回退为用户 UID） |
+| `{user_id}` | 用户 UID |
+| `{admin_status}` | 身份（Bot 管理员 / 群主 / 群管理员 / 普通用户） |
+| `{favour}` | 当前好感度数值 |
+| `{max_favour}` | 好感度上限 |
+| `{relationship}` | 关系名称（无关系记录时取 `default_relationship`） |
+| `{exclusive}` | 排他关系快照 |
+| `{rel_context}` | 会话关系表与本条消息提及（@）用户的好感度/关系信息（含换行，无内容时为空） |
+| `{levels}` | 当前好感度等级规则 |
+| `{limit}` | 好感度上下限约束说明 |
+
+> 默认模板已将原歧义的「关系：{relationship}」改为「用户是你的{relationship}」，语义更明确。
 
 **名单怎么填？**
 

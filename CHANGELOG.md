@@ -14,9 +14,27 @@
 ```
 
 ## 更新日志
-### beta (未发布) — 提示词精简实验
-- **系统提示词精简（仅 beta）**：删除 `<Rules>` 中与 `<FavorLog>` 重复的“数据以 FavourContext 为准”、压缩 `<RelationshipTags>` 的冗余说明与不可自查的次数限制、`<FavorLog>` 改用 `N` 注解、简化 GALGAME/REALISTIC 措辞
-- **注意**：本分支会改变 system_prompt，升级后对话缓存需重建；如需保留缓存请使用 `master` 分支
+### v4.4.12 (2026-11-04)
+- **系统提示词精简**：删除 `<Rules>` 中与 `<FavorLog>` 重复的“数据以 FavourContext 为准”、压缩 `<RelationshipTags>` 的冗余说明与不可自查的次数限制、`<FavorLog>` 改用 `N` 注解、简化 GALGAME/REALISTIC 措辞
+- **新增「动态提示词注入更改」配置**（高级调节）：
+  - 新增 `advanced_config.dynamic_prompt_template`，可自定义每轮注入 `<FavourContext>` 的上下文内容文本
+  - 模板必须完整保留全部占位符（`{user_name}`/`{user_id}`/`{admin_status}`/`{favour}`/`{max_favour}`/`{relationship}`/`{exclusive}`/`{rel_context}`/`{levels}`/`{limit}`），保存时前后端双重校验，缺失占位符将拒绝保存并提示中文名称
+  - WebUI 中占位符以**胶囊**形式展示中文名称（如「用户名」「用户UID」「关系名称」），点击即可作为整体胶囊插入配置框，序列化时还原为占位符代码
+  - 默认模板将原歧义的「关系：{relationship}」改为「用户是你的{relationship}」，语义更明确
+  - 默认模板将「管理员：{admin_status}」改为「身份：{admin_status}」，明确该字段表示用户在当前会话的权限身份（Bot管理员/群主/群管理员/普通用户）
+- **新增「默认关系名称」配置**：`advanced_config.default_relationship`（默认 `陌生人`），用户尚无关系记录时 `{relationship}` 渲染显示该值（替代原先固定的「无」，不改动关系确认/存储逻辑）
+- **修复全局好感度模式下主动搭话发送到无效会话的问题**（[#32](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/32)）：
+  - 全局模式下按当前适配器平台记录为 `platform:user_id`（如 `aiocqhttp:123456`），并在启动与读写时自动兼容/升级旧版纯适配器前缀记录
+  - 主动搭话调度时将全局记录拼接插入 `FriendMessage`（如 `aiocqhttp:FriendMessage:123456`）再构造合成事件或直接发送，修正 `AstrMessageEvent` 合成事件的 `session_id` 与 `unified_msg_origin`，避免将完整 UMO 重复拼接导致发送到无效会话
+- **修复 WebUI 可视化视图中已开启的开关点击关闭时无动画与状态未切换的问题**（[#33](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/33)）：
+  - 复选框切换时同步更新 `.switch-card` 的 `active` 类名，并修正 CSS 选择器使关闭状态与过渡动画正常生效
+- **支持将消息中被提及（@）用户的好感度与关系注入上下文**（[#34](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/34)）：
+  - 普通对话中检测到 `@` 提及非发话用户（自动排除 Bot 自身、发送者本人及全体成员）时，自动查询被提及用户的好感度、等级与关系并注入 `<FavourContext>` 的 `{rel_context}` 中，供模型在对话中保持对被提及用户的一致态度
+- **全面补齐与适配 WebUI 配置项**：
+  - `config_manager.py` 的 `DEFAULT_CONFIG` 补齐 `backup` 顶级配置项（`enabled: True, interval_hours: 3, retention_hours: 24`），修复 WebUI「备份快照」Tab 初次进入时开关状态与输入框默认值不匹配的问题
+  - 修复 WebUI 列表配置项（黑白名单、白名单用户、特使名单、分级/衰减/搭话规则）删除最后一项后切换 Tab 或保存时旧数据无法清空的问题
+  - WebUI「数据中心」全局好感度分组适配按适配器平台分卡展示，并显示平台全局标识（`platform:UID`）
+  - WebUI Bridge 兼容 `window.AstrBotPluginView` 与亮暗主题实时联动切换
 ### v4.4.11 (2026-10-27)
 - **新增自定义好感度判定模式与判定提示词**（[#29](https://github.com/nuomicici/astrbot_plugin_Favour_Ultra/issues/29)）：
   - 判定模式 `favour_mode` 新增 `custom` 选项，配合新配置项 `favour_mode_custom_prompt` 可自由书写判定规则，注入 LLM 的 `<ScoringMode>` 段落

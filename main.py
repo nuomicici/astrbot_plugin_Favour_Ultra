@@ -29,7 +29,7 @@ from astrbot.core.utils.session_waiter import session_waiter, SessionController
 from .utils import is_valid_userid
 from .permissions import PermLevel, PermissionManager
 from .storage import FavourDBManager, FavourRecord
-from .config_manager import PluginConfigManager
+from .config_manager import PluginConfigManager, DEFAULT_CONFIG
 
 PLUGIN_NAME = "astrbot_plugin_Favour_Ultra"
 
@@ -54,28 +54,30 @@ class FavourManagerTool(Star):
         self.group_sort_by = self.config.get("group_sort_by", "default")
         self.enable_cold_violence = self.config.get("enable_cold_violence", True)
         self.enable_relationship_table = self.config.get("enable_relationship_table", True)
-        self.min_favour_value = self.config.get("min_favour_value", -100)
-        self.max_favour_value = self.config.get("max_favour_value", 100)
+        self.min_favour_value = self.config.get("min_favour_value", -200)
+        self.max_favour_value = self.config.get("max_favour_value", 1000)
         self.default_favour = self.config.get("default_favour", 0)
         self.favour_levels = self.config.get("favour_levels", [])
 
         # 高级配置
         adv_conf = self.config.get("advanced_config", {})
-        self.admin_default_favour = adv_conf.get("admin_default_favour") or 50
+        self.admin_default_favour = adv_conf.get("admin_default_favour") if adv_conf.get("admin_default_favour") is not None else 50
         self.favour_envoys = adv_conf.get("favour_envoys") or []
-        self.favour_increase_min = adv_conf.get("favour_increase_min") or 1
-        self.favour_increase_max = adv_conf.get("favour_increase_max") or 3
-        self.favour_decrease_min = adv_conf.get("favour_decrease_min") or 1
-        self.favour_decrease_max = adv_conf.get("favour_decrease_max") or 5
-        self.perm_level_threshold = adv_conf.get("level_threshold") or 50
+        self.favour_increase_min = adv_conf.get("favour_increase_min") if adv_conf.get("favour_increase_min") is not None else 1
+        self.favour_increase_max = adv_conf.get("favour_increase_max") if adv_conf.get("favour_increase_max") is not None else 3
+        self.favour_decrease_min = adv_conf.get("favour_decrease_min") if adv_conf.get("favour_decrease_min") is not None else 1
+        self.favour_decrease_max = adv_conf.get("favour_decrease_max") if adv_conf.get("favour_decrease_max") is not None else 5
+        self.perm_level_threshold = adv_conf.get("level_threshold") if adv_conf.get("level_threshold") is not None else 50
         self.blocked_sessions = adv_conf.get("blocked_sessions") or []
         self.allowed_sessions = adv_conf.get("allowed_sessions") or []
         self.modify_favour_permission = adv_conf.get("modify_favour_permission") or "admin"
+        self.dynamic_prompt_template = adv_conf.get("dynamic_prompt_template") or ""
+        self.default_relationship = adv_conf.get("default_relationship") or "陌生人"
 
         # 冷暴力配置
         cv_conf = self.config.get("cold_violence_config", {})
         self.cold_violence_consecutive_threshold = cv_conf.get("consecutive_decrease_threshold") or 3
-        self.cold_violence_duration_minutes = cv_conf.get("duration_minutes") or 60
+        self.cold_violence_duration_minutes = cv_conf.get("duration_minutes") or 30
         self.cold_violence_is_global = cv_conf.get("is_global", False)
         self.cold_violence_auto_blacklist = cv_conf.get("auto_blacklist_on_min", False)
         self.cold_violence_replies = cv_conf.get("replies", {
@@ -473,12 +475,20 @@ class FavourManagerTool(Star):
                 global_scope = self.active_chat_global_scope or "all"
 
                 session_groups: Dict[str, List[FavourRecord]] = {}
+                seen_session_users: Dict[Tuple[str, str], FavourRecord] = {}
                 for record in all_records:
-                    sid = record.session_id
-                    user_id = record.user_id
+                    raw_sid = record.session_id
+                    user_id = str(record.user_id)
+                    target_sid = self._resolve_proactive_target_umo(record)
+                    if not target_sid:
+                        logger.debug(f"[搭话调度器] 记录 (user={user_id}, sid={raw_sid}) 无法解析有效目标会话 UMO，跳过。")
+                        continue
 
-                    # Step 1：黑名单会话 —— 始终排除
-                    if self._session_in_list(sid, self.active_chat_blocked_sessions):
+                    # Step 1：黑名单会话 —— 始终排除（同时匹配原始 session_id 与拼接后的目标 UMO）
+                    if (
+                        self._session_in_list(raw_sid, self.active_chat_blocked_sessions)
+                        or self._session_in_list(target_sid, self.active_chat_blocked_sessions)
+                    ):
                         continue
 
                     is_wl_user = have_user_whitelist and user_id in [str(u) for u in self.active_chat_white_list_users]
@@ -487,15 +497,18 @@ class FavourManagerTool(Star):
                         # 非白名单用户：走会话白名单 / 全局生效开关
                         if have_session_whitelist:
                             # Step 2：会话白名单非空 → 仅允许白名单会话
-                            if not self._session_in_list(sid, self.active_chat_allowed_sessions):
+                            if not (
+                                self._session_in_list(raw_sid, self.active_chat_allowed_sessions)
+                                or self._session_in_list(target_sid, self.active_chat_allowed_sessions)
+                            ):
                                 continue
                         elif not have_user_whitelist:
                             # Step 3：allowed_sessions 和 white_list_users 均为空 → 按 global_scope 过滤
                             if global_scope == "private":
-                                if "FriendMessage" not in str(sid) and "PrivateMessage" not in str(sid):
+                                if "FriendMessage" not in str(target_sid) and "PrivateMessage" not in str(target_sid):
                                     continue
                             elif global_scope == "group":
-                                if "GroupMessage" not in str(sid):
+                                if "GroupMessage" not in str(target_sid):
                                     continue
                             # global_scope == "all"：不过滤
                         # else: have_user_whitelist 非空但此用户不在其中，
@@ -506,17 +519,31 @@ class FavourManagerTool(Star):
                     # else: 白名单用户 + 会话不在黑名单 → 始终允许（已过 Step 1）
 
                     # Step 4：过滤冷暴力/拉黑用户
-                    blacklist_key = f"{sid}:{user_id}" if not self._is_shared_session(sid) else user_id
-                    if blacklist_key in self.auto_blacklisted:
+                    blacklist_key = f"{raw_sid}:{user_id}" if not self._is_shared_session(raw_sid) else user_id
+                    if blacklist_key in self.auto_blacklisted or f"{target_sid}:{user_id}" in self.auto_blacklisted:
                         continue
-                    cv_key = self._get_cold_violence_key(user_id, sid)
+                    cv_key = self._get_cold_violence_key(user_id, raw_sid)
                     if cv_key in self.cold_violence_users:
                         if datetime.now() < self.cold_violence_users[cv_key]:
                             continue
 
-                    if sid not in session_groups:
-                        session_groups[sid] = []
-                    session_groups[sid].append(record)
+                    # 同一目标会话 + 同一用户去重（例如同时存在全局记录与私聊记录时，优先取与当前 is_global_favour 模式一致的记录）
+                    dedup_key = (target_sid, user_id)
+                    prev_rec = seen_session_users.get(dedup_key)
+                    if prev_rec is not None:
+                        prev_is_shared = self._is_shared_session(prev_rec.session_id)
+                        curr_is_shared = self._is_shared_session(raw_sid)
+                        if self.is_global_favour and curr_is_shared and not prev_is_shared:
+                            session_groups[target_sid] = [r for r in session_groups.get(target_sid, []) if str(r.user_id) != user_id]
+                        elif (not self.is_global_favour) and (not curr_is_shared) and prev_is_shared:
+                            session_groups[target_sid] = [r for r in session_groups.get(target_sid, []) if str(r.user_id) != user_id]
+                        else:
+                            continue
+                    seen_session_users[dedup_key] = record
+
+                    if target_sid not in session_groups:
+                        session_groups[target_sid] = []
+                    session_groups[target_sid].append(record)
                 
                 # 按好感度区间匹配概率规则（从高到低排序）
                 rules_sorted = sorted(self.active_chat_rules or [], 
@@ -656,7 +683,10 @@ class FavourManagerTool(Star):
                                     last_group_id = session_id.split(":")[2] if 'GroupMessage' in str(session_id) and session_id.count(":") >= 2 else ""
                                     _platform_meta = platform_info.get("platform_meta")
                                 #################
-                                synth_msg.session_id = session_id
+                                # AstrMessageEvent 通过 f"{platform}:{type}:{session_id}" 拼接 unified_msg_origin，
+                                # 因此传入的 raw_session_id 应为目标会话 ID（第三段，如群号或用户 QQ 号），而非完整三段 UMO。
+                                raw_target_session_id = session_id.split(":", 2)[2] if session_id.count(":") >= 2 else user_id
+                                synth_msg.session_id = raw_target_session_id
                                 synth_msg.message_id = f"active_chat_{datetime.now().timestamp()}"
                                 synth_msg.sender = MessageMember(user_id=user_id, nickname=user_id)
                                 synth_msg.message = [Plain(text=prompt)]
@@ -671,8 +701,10 @@ class FavourManagerTool(Star):
                                     message_str=prompt,
                                     message_obj=synth_msg,
                                     platform_meta=_platform_meta,
-                                    session_id=session_id,
+                                    session_id=raw_target_session_id,
                                 )
+                                # 确保 unified_msg_origin 为完整三段式 UMO（如 aiocqhttp:FriendMessage:123456）
+                                synth_event.unified_msg_origin = session_id
                                 #################
                                 # 关键标志：让管线正常处理（触发 LLM + 分段等）
                                 synth_event.is_at_or_wake_command = True
@@ -1150,7 +1182,9 @@ class FavourManagerTool(Star):
                         "last_interaction": r.last_interaction.isoformat() if r.last_interaction else ""
                     }
                     if self._is_shared_session(r.session_id):
-                        base["session_id"] = r.session_id
+                        sid = r.session_id or "global"
+                        base["session_id"] = sid
+                        base["platform"] = sid.split(":", 1)[0] if ":" in sid else sid
                         global_list.append(base)
                     else:
                         parts = r.session_id.split(":", 2)
@@ -1271,11 +1305,15 @@ class FavourManagerTool(Star):
         """规范化 UMO（去空白）。支持 webchat / 各平台适配器会话 ID。"""
         return (umo or "").strip()
 
-    def _get_sync_partners(self, session_id: str) -> List[str]:
+    def _get_sync_partners(self, session_id: str, user_id: Optional[str] = None) -> List[str]:
         """返回与 session_id 完全同步的配对 UMO 列表（双向）。"""
         sid = self._normalize_umo(session_id)
         if not sid:
             return []
+        # 兼容：若 sid 为 'platform:user_id' 平台全局格式，同时匹配配置为纯 'platform' 的同步对
+        sid_candidates = {sid}
+        if self._is_shared_session(sid) and ":" in sid:
+            sid_candidates.add(sid.split(":", 1)[0])
         partners: List[str] = []
         for pair in (self.session_sync_pairs or []):
             if not pair or not pair.get("enabled", True):
@@ -1284,10 +1322,17 @@ class FavourManagerTool(Star):
             b = self._normalize_umo(pair.get("b", ""))
             if not a or not b or a == b:
                 continue
-            if sid == a and b not in partners:
-                partners.append(b)
-            elif sid == b and a not in partners:
-                partners.append(a)
+            target = None
+            if a in sid_candidates:
+                target = b
+            elif b in sid_candidates:
+                target = a
+            if target:
+                # 若配对目标为纯平台名（如 'aiocqhttp'）且已知 user_id，转换为 'aiocqhttp:{user_id}'
+                if user_id and self._is_shared_session(target) and target != "global" and ":" not in target:
+                    target = f"{target}:{user_id}"
+                if target not in partners and target != sid:
+                    partners.append(target)
         return partners
 
     async def _write_favour(
@@ -1325,7 +1370,7 @@ class FavourManagerTool(Star):
         """将变更同步到配对会话（不递归）。"""
         if self._sync_propagating or not session_id:
             return
-        partners = self._get_sync_partners(session_id)
+        partners = self._get_sync_partners(session_id, user_id=user_id)
         if not partners:
             return
         self._sync_propagating = True
@@ -1399,13 +1444,14 @@ class FavourManagerTool(Star):
                 known = {s["session_id"] for s in sessions}
                 for sid in list(self._last_events.keys()):
                     if sid and sid not in known:
+                        is_shared = self._is_shared_session(sid)
                         sessions.append({
                             "session_id": sid,
                             "count": 0,
                             "platform": sid.split(":")[0] if ":" in sid else sid,
-                            "session_type": sid.split(":")[1] if sid.count(":") >= 1 else "",
-                            "session_target": sid.split(":")[2] if sid.count(":") >= 2 else "",
-                            "is_shared": ":" not in sid,
+                            "session_type": "" if is_shared else (sid.split(":")[1] if sid.count(":") >= 1 else ""),
+                            "session_target": "" if is_shared else (sid.split(":")[2] if sid.count(":") >= 2 else ""),
+                            "is_shared": is_shared,
                             "from_cache": True,
                         })
                 return jsonify({"sessions": sessions})
@@ -1537,26 +1583,28 @@ class FavourManagerTool(Star):
         self.group_sort_by = cfg.get("group_sort_by", "default")
         self.enable_cold_violence = cfg.get("enable_cold_violence", True)
         self.enable_relationship_table = cfg.get("enable_relationship_table", True)
-        self.min_favour_value = cfg.get("min_favour_value", -100)
-        self.max_favour_value = cfg.get("max_favour_value", 100)
+        self.min_favour_value = cfg.get("min_favour_value", -200)
+        self.max_favour_value = cfg.get("max_favour_value", 1000)
         self.default_favour = cfg.get("default_favour", 0)
         self.favour_levels = cfg.get("favour_levels", [])
 
         adv = cfg.get("advanced_config", {})
-        self.admin_default_favour = adv.get("admin_default_favour") or 50
+        self.admin_default_favour = adv.get("admin_default_favour") if adv.get("admin_default_favour") is not None else 50
         self.favour_envoys = adv.get("favour_envoys") or []
-        self.favour_increase_min = adv.get("favour_increase_min") or 1
-        self.favour_increase_max = adv.get("favour_increase_max") or 3
-        self.favour_decrease_min = adv.get("favour_decrease_min") or 1
-        self.favour_decrease_max = adv.get("favour_decrease_max") or 5
-        self.perm_level_threshold = adv.get("level_threshold") or 50
+        self.favour_increase_min = adv.get("favour_increase_min") if adv.get("favour_increase_min") is not None else 1
+        self.favour_increase_max = adv.get("favour_increase_max") if adv.get("favour_increase_max") is not None else 3
+        self.favour_decrease_min = adv.get("favour_decrease_min") if adv.get("favour_decrease_min") is not None else 1
+        self.favour_decrease_max = adv.get("favour_decrease_max") if adv.get("favour_decrease_max") is not None else 5
+        self.perm_level_threshold = adv.get("level_threshold") if adv.get("level_threshold") is not None else 50
         self.blocked_sessions = adv.get("blocked_sessions") or []
         self.allowed_sessions = adv.get("allowed_sessions") or []
         self.modify_favour_permission = adv.get("modify_favour_permission") or "admin"
+        self.dynamic_prompt_template = adv.get("dynamic_prompt_template") or ""
+        self.default_relationship = adv.get("default_relationship") or "陌生人"
 
         cv = cfg.get("cold_violence_config", {})
         self.cold_violence_consecutive_threshold = cv.get("consecutive_decrease_threshold") or 3
-        self.cold_violence_duration_minutes = cv.get("duration_minutes") or 60
+        self.cold_violence_duration_minutes = cv.get("duration_minutes") or 30
         self.cold_violence_is_global = cv.get("is_global", False)
         self.cold_violence_auto_blacklist = cv.get("auto_blacklist_on_min", False)
         self.cold_violence_replies = cv.get("replies", self.cold_violence_replies)
@@ -1704,20 +1752,146 @@ class FavourManagerTool(Star):
             
         return None
 
-    def _get_session_id(self, event: AstrMessageEvent) -> Optional[str]:
+    def _get_session_id(self, event: AstrMessageEvent, target_uid: Optional[str] = None) -> Optional[str]:
         if self.is_global_favour:
-            # 按适配器共享：提取适配器前缀（如 "aiocqhttp"、"telegram"）
-            origin = event.unified_msg_origin
-            if origin and ":" in origin:
-                return origin.split(":")[0]
-            return origin or "global"
+            # 按适配器平台全局共享：记录为 f"{platform}:{uid}"（如 "aiocqhttp:123456"）
+            origin = getattr(event, "unified_msg_origin", None) or ""
+            platform = origin.split(":")[0] if ":" in origin else origin
+            if not platform or platform == "global":
+                return "global"
+            uid = str(target_uid) if target_uid else str(event.get_sender_id())
+            if uid:
+                return f"{platform}:{uid}"
+            return platform
         return event.unified_msg_origin
 
     @staticmethod
     def _is_shared_session(session_id: str) -> bool:
-        """判断是否为共享会话（旧版 'global' 或新版适配器前缀如 'aiocqhttp'）。
-        共享会话的 session_id 不包含 ':'，而独立会话格式为 'platform:type:target'。"""
-        return ":" not in (session_id or "")
+        """判断是否为共享会话（新版 'aiocqhttp:123456'、旧版适配器前缀 'aiocqhttp' 或 'global'）。
+        独立会话 UMO 格式为三段 'platform:MessageType:target_id'（含至少 2 个 ':'）。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            return True
+        return sid.count(":") < 2
+
+    def _resolve_proactive_target_umo(self, record: FavourRecord) -> Optional[str]:
+        """将好感度记录的 session_id 转换为可用于主动搭话的完整三段式 UMO。
+
+        - 独立会话（如 'aiocqhttp:FriendMessage:123456' 或 'aiocqhttp:GroupMessage:789'）：原样返回。
+        - 平台全局会话（如 'aiocqhttp:123456'）：在平台名与用户ID之间插入 'FriendMessage'，
+          拼接为 'aiocqhttp:FriendMessage:123456'。
+        - 旧版适配器前缀会话（如 'aiocqhttp'）：与 record.user_id 拼接为 'aiocqhttp:FriendMessage:{user_id}'。
+        - 旧版 'global' 会话：若运行时 _platform_cache 已缓存适配器平台，则取首个可用平台拼接，否则返回 None。
+        """
+        sid = (record.session_id or "").strip()
+        uid = str(record.user_id or "").strip()
+        if not sid or not uid:
+            return None
+        if not self._is_shared_session(sid):
+            return sid
+        if ":" in sid:
+            platform, target = sid.split(":", 1)
+            platform = platform.strip()
+            target = target.strip() or uid
+            if not platform or platform == "global":
+                return None
+            return f"{platform}:FriendMessage:{target}"
+        if sid == "global":
+            # 兜底：若运行时已有缓存的平台，使用首个支持主动消息的平台
+            for plat in self._platform_cache.keys():
+                if plat and plat != "global":
+                    return f"{plat}:FriendMessage:{uid}"
+            return None
+        return f"{sid}:FriendMessage:{uid}"
+
+    def _extract_mentioned_users(self, event: AstrMessageEvent, sender_uid: str) -> List[Tuple[str, str]]:
+        """从消息组件中提取被 @ 提及的用户列表 [(uid, hint_name), ...]。
+
+        自动过滤：
+          - Bot 自身 ID（self_id）
+          - 全体成员（all / 0）与无效 UID
+          - 当前消息发送者自身（sender_uid）
+          - 同一消息中重复 @ 的同一用户（保持首次出现顺序）
+        """
+        bot_self_id = None
+        if hasattr(event, "message_obj") and hasattr(event.message_obj, "self_id"):
+            raw_self_id = getattr(event.message_obj, "self_id", None)
+            if raw_self_id is not None:
+                bot_self_id = str(raw_self_id)
+
+        mentioned: List[Tuple[str, str]] = []
+        seen: set = set()
+        if hasattr(event, "message_obj") and hasattr(event.message_obj, "message"):
+            for component in (event.message_obj.message or []):
+                if isinstance(component, At):
+                    uid = str(getattr(component, "qq", "") or "").strip()
+                    if not uid or uid.lower() == "all" or uid == "0":
+                        continue
+                    if bot_self_id and uid == bot_self_id:
+                        continue
+                    if uid == str(sender_uid):
+                        continue
+                    if not is_valid_userid(uid):
+                        continue
+                    if uid in seen:
+                        continue
+                    seen.add(uid)
+                    hint_name = str(getattr(component, "name", "") or "").lstrip("@").strip()
+                    mentioned.append((uid, hint_name))
+        return mentioned
+
+    def _get_level_name(self, favour_value: int) -> str:
+        """根据好感度数值返回匹配的等级名称（供提及用户上下文展示）。"""
+        if not self.favour_levels:
+            return ""
+        for lv in self.favour_levels:
+            min_val = lv.get("min", -999)
+            max_val = lv.get("max", 999)
+            if min_val <= favour_value <= max_val:
+                return str(lv.get("name", "") or "")
+        # 未精确命中时取距离最近的等级名
+        nearest_name = ""
+        nearest_dist = None
+        for lv in self.favour_levels:
+            min_val = lv.get("min", -999)
+            max_val = lv.get("max", 999)
+            dist = (favour_value - max_val) if favour_value > max_val else (min_val - favour_value)
+            if nearest_dist is None or dist < nearest_dist:
+                nearest_dist = dist
+                nearest_name = str(lv.get("name", "") or "")
+        return nearest_name
+
+    async def _build_mentioned_users_context(self, event: AstrMessageEvent, sender_uid: str) -> str:
+        """构建消息中被提及（@）用户的好感度与关系上下文文本。"""
+        mentioned = self._extract_mentioned_users(event, sender_uid)
+        if not mentioned:
+            return ""
+
+        default_rel = (self.default_relationship or "陌生人").strip() or "陌生人"
+        rows: List[str] = []
+        for m_uid, hint_name in mentioned:
+            m_sid = self._get_session_id(event, target_uid=m_uid)
+            m_rec = await self.db_manager.get_favour(m_uid, m_sid)
+            if m_rec:
+                m_fav = m_rec.favour
+                raw_rel = (m_rec.relationship or "").strip()
+                m_rel = raw_rel if (raw_rel and raw_rel not in ("无", "None", "null")) else default_rel
+                m_name = (m_rec.username or "").strip() or hint_name
+            else:
+                m_fav = await self._get_initial_favour(event, target_uid=m_uid)
+                m_rel = default_rel
+                m_name = hint_name
+
+            if not m_name:
+                m_name = await self._get_user_display_name(event, m_uid)
+            m_name = m_name or m_uid
+
+            lv_name = self._get_level_name(m_fav)
+            lv_part = f" | 等级:{lv_name}" if lv_name else ""
+            rows.append(
+                f"用户:{m_name} | UID:{m_uid} | 好感:{m_fav}/{self.max_favour_value}{lv_part} | 该用户是你的{m_rel}"
+            )
+        return "\n".join(rows)
 
     @staticmethod
     def _session_in_list(session_id: str, allowlist: list) -> bool:
@@ -1833,26 +2007,24 @@ class FavourManagerTool(Star):
             return self.query_group_normal
         return self.query_private_normal
 
-    async def _get_initial_favour(self, event: AstrMessageEvent) -> int:
-        user_id = str(event.get_sender_id())
+    async def _get_initial_favour(self, event: AstrMessageEvent, target_uid: Optional[str] = None) -> int:
+        user_id = str(target_uid) if target_uid else str(event.get_sender_id())
         
         # 无论全局/独立模式，都尝试从已有共享记录继承好感度
-        # 全局模式：当前 key 是适配器前缀，但旧版数据可能存在 "global" 下
-        # 独立模式：新会话可从共享池继承初始值
-        # 先查旧版 "global"
+        # 先查平台全局记录（如 "aiocqhttp:123456" 或旧版 "aiocqhttp"）
+        origin = getattr(event, "unified_msg_origin", None) or ""
+        if origin and ":" in origin:
+            adapter_prefix = origin.split(":")[0]
+            adapter_rec = await self.db_manager.get_favour(user_id, f"{adapter_prefix}:{user_id}")
+            if adapter_rec:
+                return max(self.min_favour_value, min(self.max_favour_value, adapter_rec.favour))
+        # 再查旧版 "global"
         global_rec = await self.db_manager.get_favour(user_id, "global")
         if global_rec:
             return max(self.min_favour_value, min(self.max_favour_value, global_rec.favour))
-        # 再查适配器前缀记录（如 "aiocqhttp"）
-        origin = event.unified_msg_origin
-        if origin and ":" in origin:
-            adapter_prefix = origin.split(":")[0]
-            adapter_rec = await self.db_manager.get_favour(user_id, adapter_prefix)
-            if adapter_rec:
-                return max(self.min_favour_value, min(self.max_favour_value, adapter_rec.favour))
 
         is_envoy = str(user_id) in [str(e) for e in self.favour_envoys]
-        is_admin = await self._check_permission(event, PermLevel.OWNER) 
+        is_admin = (await self._check_permission(event, PermLevel.OWNER)) if user_id == str(event.get_sender_id()) else False
         
         base = self.admin_default_favour if (is_envoy or is_admin) else self.default_favour
         return max(self.min_favour_value, min(self.max_favour_value, base))
@@ -1963,6 +2135,52 @@ class FavourManagerTool(Star):
         if not custom_prompt:
             return ""
         return f"\n\n<ScoringModeOverride>\n{custom_prompt}\n</ScoringModeOverride>"
+
+    def _build_dynamic_prompt(
+        self,
+        user_id: str,
+        user_name: str,
+        admin_status: str,
+        current_favour: int,
+        current_relationship: str,
+        exclusive_db_text: str,
+        rel_context: str,
+        levels_rule: str,
+        limit_constraint_text: str,
+    ) -> str:
+        """渲染每轮注入的 <FavourContext> 内容。
+
+        使用 advanced_config.dynamic_prompt_template 作为模板，替换其中的占位符。
+        若模板为空，则退回内置默认模板。
+        """
+        template = (self.dynamic_prompt_template or "").strip()
+        if not template:
+            template = DEFAULT_CONFIG["advanced_config"]["dynamic_prompt_template"]
+
+        # relationship 在无关系记录时为「无」，直接拼入「用户是你的{relationship}」会语义不通，
+        # 渲染层统一改为「陌生人」，不改动关系确认/存储逻辑。
+        rel_display = (current_relationship or "").strip()
+        if not rel_display or rel_display in ("无", "None", "null"):
+            rel_display = (self.default_relationship or "陌生人").strip() or "陌生人"
+
+        value_map = {
+            "user_name": user_name or user_id,
+            "user_id": user_id,
+            "admin_status": admin_status,
+            "favour": current_favour,
+            "max_favour": self.max_favour_value,
+            "relationship": rel_display,
+            "exclusive": exclusive_db_text,
+            "rel_context": rel_context,
+            "levels": levels_rule,
+            "limit": limit_constraint_text,
+        }
+
+        # 用逐项替换而非 str.format：模板中可能含其他花括号，避免 KeyError。
+        rendered = template
+        for key, val in value_map.items():
+            rendered = rendered.replace("{" + key + "}", str(val))
+        return rendered
 
     def _build_favour_levels_prompt(self, current_favour: Optional[int] = None) -> str:
         """根据 favour_levels 配置构建好感度分级规则文本。
@@ -2138,15 +2356,13 @@ class FavourManagerTool(Star):
         主动搭话时才能拿到可用的合成事件模板。
         """
         try:
-            session_id = self._get_session_id(event)
-            if not session_id:
-                return
-            # 非共享会话：按完整 UMO 缓存事件
-            if not self._is_shared_session(session_id):
-                self._last_events[session_id] = event
+            origin = getattr(event, "unified_msg_origin", None) or ""
+            # 按完整三段式 UMO 缓存事件（全局/非全局模式均缓存真实会话 UMO，以便搭话合成事件复用）
+            if origin and not self._is_shared_session(origin):
+                self._last_events[origin] = event
             # 平台级缓存（对全局/非全局模式都生效）：兜底同平台其他会话的搭话
-            platform = session_id.split(":")[0] if ":" in session_id else session_id
-            if platform not in self._platform_cache and hasattr(event, 'platform_meta'):
+            platform = origin.split(":")[0] if ":" in origin else origin
+            if platform and platform not in self._platform_cache and hasattr(event, 'platform_meta'):
                 self._platform_cache[platform] = {
                     "platform_meta": event.platform_meta,
                     "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
@@ -2157,24 +2373,26 @@ class FavourManagerTool(Star):
     @filter.on_llm_request()
     async def inject_favour_prompt(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         try:
-            session_id = self._get_session_id(event)
             user_id = str(event.get_sender_id())
-
-            # 兜底：若 event_message_type 钩子未缓存（如早期版本启动顺序问题），这里再补一次
-            if session_id and not self._is_shared_session(session_id) and session_id not in self._last_events:
-                self._last_events[session_id] = event
-                platform = session_id.split(":")[0] if ":" in session_id else session_id
-                if platform not in self._platform_cache and hasattr(event, 'platform_meta'):
-                    self._platform_cache[platform] = {
-                        "platform_meta": event.platform_meta,
-                        "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
-                    }
             # 搭话合成事件：使用目标用户的好感度数据
             is_synthetic = event.get_extra("_is_active_chat_synthetic")
             target_uid = event.get_extra("_active_chat_target_uid")
             if is_synthetic and target_uid:
                 user_id = str(target_uid)
                 logger.debug(f"[搭话管线] 合成事件注入目标用户 {user_id} 的好感度/关系数据。")
+
+            session_id = self._get_session_id(event, target_uid=user_id)
+
+            # 兜底：若 event_message_type 钩子未缓存（如早期版本启动顺序问题），这里再补一次
+            origin = getattr(event, "unified_msg_origin", None) or ""
+            if origin and not self._is_shared_session(origin) and origin not in self._last_events:
+                self._last_events[origin] = event
+                platform = origin.split(":")[0] if ":" in origin else origin
+                if platform and platform not in self._platform_cache and hasattr(event, 'platform_meta'):
+                    self._platform_cache[platform] = {
+                        "platform_meta": event.platform_meta,
+                        "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
+                    }
 
             if not self._is_shared_session(session_id):
                 if self.allowed_sessions and not self._session_in_list(session_id, self.allowed_sessions):
@@ -2246,16 +2464,15 @@ class FavourManagerTool(Star):
             exclusive_prompt_addon = ""
             relationship_table_str = ""
             
-            if not self._is_shared_session(session_id):
-                records = await self.db_manager.get_all_in_session(session_id)
-                
-                # 1. 排他性关系检查
+            records = await self.db_manager.get_all_in_session(session_id)
+            if records:
+                # 1. 排他性关系检查（全局/独立会话均检查当前池内排他绑定）
                 unique_rels = [f"{r.relationship}(用户:{r.user_id})" for r in records if r.is_unique and r.relationship]
                 if unique_rels:
                     exclusive_prompt_addon = "，".join(unique_rels)
                 
-                # 2. 关系表注入 (如果开启)
-                if self.enable_relationship_table:
+                # 2. 关系表注入 (如果开启且为独立会话)
+                if not self._is_shared_session(session_id) and self.enable_relationship_table:
                     rel_rows = []
                     for r in records:
                         if r.relationship and r.user_id != user_id:
@@ -2263,6 +2480,11 @@ class FavourManagerTool(Star):
                     
                     if rel_rows:
                         relationship_table_str = "\n".join(rel_rows)
+
+            # 3. 消息中被提及（@）用户的好感度与关系上下文（非合成事件时提取）
+            mentioned_users_str = ""
+            if not is_synthetic:
+                mentioned_users_str = await self._build_mentioned_users_context(event, user_id)
 
             # ============================================================
             # 构建模式指令（静态，不含动态变量引用）
@@ -2276,6 +2498,8 @@ class FavourManagerTool(Star):
             levels_rule = self._build_favour_levels_prompt(current_favour=current_favour)
             exclusive_db_text = exclusive_prompt_addon if exclusive_prompt_addon else "无"
             rel_context = f"\n关系表:\n{relationship_table_str}" if relationship_table_str else ""
+            if mentioned_users_str:
+                rel_context += f"\n消息提及用户(非当前发话者，仅供对话参考，好感度日志仍只评估当前发话者{user_id}):\n{mentioned_users_str}"
 
             if current_favour >= self.max_favour_value:
                 limit_constraint_text = f"若当前好感度 {current_favour} 已达到上限 {self.max_favour_value}，则禁止输出 [好感度 上升]，仅允许输出 [好感度 持平] 或 [好感度 降低]。"
@@ -2326,10 +2550,17 @@ class FavourManagerTool(Star):
             #   每轮请求重新生成，不影响 system_prompt 缓存
             # ============================================================
             dynamic_prompt = f"""<FavourContext>
-用户:{user_id} | 管理员:{admin_status} | 好感:{current_favour}/{self.max_favour_value} | 关系:{current_relationship}
-排他关系:{exclusive_db_text}{rel_context}
-等级:{levels_rule}
-限制:{limit_constraint_text}
+{self._build_dynamic_prompt(
+    user_id=user_id,
+    user_name=(record.username or user_id) if record else user_id,
+    admin_status=admin_status,
+    current_favour=current_favour,
+    current_relationship=current_relationship,
+    exclusive_db_text=exclusive_db_text,
+    rel_context=rel_context,
+    levels_rule=levels_rule,
+    limit_constraint_text=limit_constraint_text,
+)}
 <MandatoryFooter>回复最后一行必须输出好感度日志标签（上升/降低/持平 三选一），即使历史消息中没有先例也不例外。</MandatoryFooter>
 </FavourContext>"""
 
@@ -2503,7 +2734,6 @@ class FavourManagerTool(Star):
 
         try:
             sender_id = str(event.get_sender_id())
-            session_id = self._get_session_id(event)
             
             # === 解析操作目标用户 ===
             # 优先级：dissolve_target > active_rel_target > rel_target > sender（默认）
@@ -2513,10 +2743,11 @@ class FavourManagerTool(Star):
                 data.get('rel_target') or
                 sender_id
             )
+            session_id = self._get_session_id(event, target_uid=target_user_id)
             
             record = await self.db_manager.get_favour(target_user_id, session_id)
             old_fav = record.favour if record else (
-                await self._get_initial_favour(event) if target_user_id == sender_id else 0
+                await self._get_initial_favour(event, target_uid=target_user_id) if target_user_id == sender_id else 0
             )
             
             new_fav = old_fav + data['change']
@@ -2619,9 +2850,9 @@ class FavourManagerTool(Star):
                 else:
                     del self.cold_violence_users[cv_key]
         
-        session_id = self._get_session_id(event)
+        session_id = self._get_session_id(event, target_uid=target_uid)
         record = await self.db_manager.get_favour(target_uid, session_id)
-        fav = record.favour if record else (await self._get_initial_favour(event) if target_uid == str(event.get_sender_id()) else 0)
+        fav = record.favour if record else (await self._get_initial_favour(event, target_uid=target_uid) if target_uid == str(event.get_sender_id()) else 0)
         rel = record.relationship if record else "无"
         uniq = " (唯一)" if record and record.is_unique else ""
         
@@ -2643,7 +2874,8 @@ class FavourManagerTool(Star):
             yield event.plain_result("当前为全局（适配器共享）模式，此命令显示当前适配器内所有好感度记录。请使用【查询全局好感度】查看全部。")
             
         session_id = self._get_session_id(event)
-        records = await self.db_manager.get_all_in_session(session_id)
+        display_sid = session_id.split(":", 1)[0] if (self.is_global_favour and session_id and ":" in session_id) else session_id
+        records = await self.db_manager.get_all_in_session(display_sid)
         
         if not records:
             yield event.plain_result("当前会话暂无好感度记录。")
@@ -2672,7 +2904,7 @@ class FavourManagerTool(Star):
             uniq = "是" if r.is_unique else "否"
             rows.append(f"| {name} | {r.user_id} | {r.favour} | {rel} | {uniq} |")
             
-        title = f"📊 当前会话好感度列表 (SID: {self._escape_markdown(session_id)}) - 第 {page}/{total_pages} 页"
+        title = f"📊 当前会话好感度列表 (SID: {self._escape_markdown(display_sid)}) - 第 {page}/{total_pages} 页"
         await self._send_chunked_t2i(event, title, headers, rows)
 
     @filter.command("查询全部好感度", alias={'查全部好感度', '查看全部好感度', '全部好感度'})
@@ -2792,7 +3024,7 @@ class FavourManagerTool(Star):
             yield event.plain_result("未找到用户，请使用 @ 或输入 ID。")
             return
             
-        session_id = self._get_session_id(event)
+        session_id = self._get_session_id(event, target_uid=uid)
         
         # 边界检查：clamp 到 [min, max] 并告知用户
         orig_value = value
@@ -2824,7 +3056,7 @@ class FavourManagerTool(Star):
             yield event.plain_result("未找到用户。")
             return
             
-        session_id = self._get_session_id(event)
+        session_id = self._get_session_id(event, target_uid=uid)
         unique_bool = bool(is_unique)
         try:
             await self._write_favour(uid, session_id, relationship=rel_name, is_unique=unique_bool)
@@ -2846,7 +3078,7 @@ class FavourManagerTool(Star):
             yield event.plain_result("未找到用户。")
             return
             
-        session_id = self._get_session_id(event)
+        session_id = self._get_session_id(event, target_uid=uid)
         try:
             await self._write_favour(uid, session_id, relationship="", is_unique=False)
             yield event.plain_result(f"已解除用户 {uid} 的所有关系。")
@@ -2988,7 +3220,7 @@ class FavourManagerTool(Star):
         @session_waiter(timeout=30, record_history_chains=False)
         async def confirm_waiter(controller: SessionController, evt: AstrMessageEvent):
             if evt.message_str.strip() == "确认清空":
-                sid = self._get_session_id(evt)
+                sid = self._get_session_id(evt, target_uid=uid)
                 record = await self.db_manager.get_favour(uid, sid)
                 if record:
                     backup_file = await self.db_manager.backup_data([record], f"backup_user_{uid}_{sid}")
@@ -3016,7 +3248,8 @@ class FavourManagerTool(Star):
             yield event.plain_result("权限不足！需要群主及以上权限。")
             return
             
-        sid = self._get_session_id(event)
+        raw_sid = self._get_session_id(event)
+        sid = raw_sid.split(":", 1)[0] if (self.is_global_favour and raw_sid and ":" in raw_sid) else raw_sid
         yield event.plain_result(f"⚠️ 警告：即将清空当前会话 ({sid}) 的所有好感度数据。\n请在 30 秒内回复「确认清空」以继续，回复其他内容取消。")
         
         @session_waiter(timeout=30, record_history_chains=False)

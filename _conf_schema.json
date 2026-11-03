@@ -24,8 +24,8 @@
     "description": "【旧版迁移兼容】好感度判定模式 — 此页面仅供迁移数据，修改无效",
     "type": "string",
     "default": "galgame",
-    "options": ["galgame", "realistic"],
-    "hint": "⚠️ 旧版配置项，仅供插件升级时迁移使用。实际配置请前往「插件管理 → 插件详情 → Pages → 配置中心」。"
+    "options": ["galgame", "realistic", "custom"],
+    "hint": "旧版配置项，仅供插件升级时迁移使用。实际配置请前往「插件管理 → 插件详情 → Pages → 配置中心」。"
   },
   "is_global_favour": {
     "description": "【旧版迁移兼容】全局好感度 — 此页面仅供迁移数据，修改无效",
