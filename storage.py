@@ -1005,6 +1005,8 @@ class FavourDBManager:
         await self.init_db()
         source_sid = (source_sid or "").strip()
         target_sid = (target_sid or "").strip()
+        if target_sid.endswith((":", ":UID", ":uid", ":user_id")):
+            target_sid = target_sid.split(":", 1)[0].strip()
         if not source_sid or not target_sid:
             return False, "源/目标会话 UMO 不能为空", 0
         if source_sid == target_sid:

@@ -3,7 +3,7 @@
 
 # 可自定义好感度系统 (Favour Ultra)
 
-[![当前版本](https://img.shields.io/badge/当前版本v4.4.12-blue?style=for-the-badge)](CHANGELOG.md)
+[![当前版本](https://img.shields.io/badge/当前版本v4.4.13-blue?style=for-the-badge)](CHANGELOG.md)
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
@@ -11,6 +11,7 @@
 
 最新动态 (2026-11-04)
 
+* **旧版共享池迁移优化与面板改进 (v4.4.13)**：自动找回升级后未带上平台名称的旧版全局好感度数据；「数据中心」新增黄色提醒框与一键跳转迁移指引；修改配置后若改回原样，自动取消「未保存改动」提示
 * **动态注入与提及感知 (v4.4.12)**：新增胶囊化动态提示词注入模板与默认关系名称；支持自动识别消息中被 `@` 提及用户的好感度与关系注入上下文（#34）；全局好感度改为 `platform:UID` 并修复全局主动搭话 UMO 拼接问题（#32）；修复 WebUI 开关关闭动画与配置同步问题（#33）
 * **自定义判定模式 (v4.4.11)**：判定模式新增 `custom`，配合 `favour_mode_custom_prompt` 可自由书写判定提示词，WebUI 选择自定义后即时展开编辑框
 * **修复跨夜搭话时段 (v4.4.10)**：`time_start` 晚于 `time_end` 时按跨夜时段判定（如 `16:00`-`09:30`），修复夜间时段失效问题

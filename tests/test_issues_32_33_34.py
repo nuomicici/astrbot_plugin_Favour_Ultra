@@ -247,6 +247,15 @@ class Issues32To34Tests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("\n.switch-card.active .switch-ctrl {", style_css)
         self.assertIn('input[type="checkbox"]:checked + .switch-card .switch-ctrl', style_css)
 
+        # 验证数据中心黄色提醒框与快速迁移指引、未保存改动回退检测与版本号 4.4.13
+        self.assertIn('id="legacy-global-alert"', app_js)
+        self.assertIn('jumpToLegacyMigrate', app_js)
+        self.assertIn('.legacy-global-alert', style_css)
+        self.assertIn('function isConfigEqual(a, b)', app_js)
+        self.assertIn('function syncDirtyState()', app_js)
+        meta_text = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
+        self.assertIn("version: v4.4.13", meta_text)
+
     async def test_issue34_mentioned_users_favour_context(self):
         stub = self._make_plugin_stub(is_global=False)
         records_map = {

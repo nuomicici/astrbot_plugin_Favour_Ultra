@@ -1163,7 +1163,7 @@ class FavourManagerTool(Star):
                     return m.group(1).strip()
         except Exception as e:
             logger.debug(f"读取插件版本号失败: {e}")
-        return "v4.4.4"
+        return "v4.4.13"
 
     async def _api_get_config(self):
         """GET /config → 返回当前完整配置与实际插件版本"""
@@ -1506,6 +1506,25 @@ class FavourManagerTool(Star):
                             "is_shared": is_shared,
                             "from_cache": True,
                         })
+                        known.add(sid)
+                # 补充当前已加载或已出现过的适配器平台标识（方便在「迁移同步」中将 global 一键迁移到目标适配器）
+                known_platforms = set(self._get_known_platform_ids() or set())
+                for s in list(sessions):
+                    plat = (s.get("platform") or "").strip()
+                    if plat and plat != "global" and ":" not in plat:
+                        known_platforms.add(plat)
+                for plat in sorted(known_platforms):
+                    if plat and plat != "global" and plat not in known:
+                        sessions.append({
+                            "session_id": plat,
+                            "count": 0,
+                            "platform": plat,
+                            "session_type": "",
+                            "session_target": "",
+                            "is_shared": True,
+                            "from_cache": True,
+                        })
+                        known.add(plat)
                 return jsonify({"sessions": sessions})
 
             data = await request.get_json()
