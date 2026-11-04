@@ -139,6 +139,7 @@ class FavourManagerTool(Star):
         # 平台级缓存：{平台前缀: {self_id, platform_meta}}，兜底无会话事件时的搭话
         #################
         self._platform_cache: Dict[str, dict] = {}
+        self._deferred_migration_done: bool = False
 
         self._validate_config()
         
@@ -150,6 +151,7 @@ class FavourManagerTool(Star):
         # 数据库初始化
         self.data_dir = Path(context.get_config().get("plugin.data_dir", "./data")) / "plugin_data" / "astrbot_plugin_favour_ultra"
         self.db_manager = FavourDBManager(self.data_dir, self.min_favour_value, self.max_favour_value)
+        self.db_manager.platform_resolver = self._get_known_platform_ids
         
         # 异步初始化数据库和迁移数据
         asyncio.create_task(self._init_storage())
@@ -257,6 +259,31 @@ class FavourManagerTool(Star):
         logger.info("好感度插件调度器已全部取消。")
         #################
 
+    def _get_known_platform_ids(self) -> set:
+        """获取当前 AstrBot 实例中已加载或已观测到的适配器平台标识集合（对应 UMO 第一段）。"""
+        ids: set = set()
+        try:
+            pm = getattr(self.context, "platform_manager", None)
+            if pm and hasattr(pm, "get_insts"):
+                for inst in (pm.get_insts() or []):
+                    pid = None
+                    if hasattr(inst, "meta"):
+                        try:
+                            meta = inst.meta()
+                            pid = getattr(meta, "id", None) or getattr(meta, "name", None)
+                        except Exception:
+                            pass
+                    if not pid and hasattr(inst, "config") and isinstance(inst.config, dict):
+                        pid = inst.config.get("id") or inst.config.get("type")
+                    if pid and str(pid).strip() and str(pid).strip() != "global":
+                        ids.add(str(pid).strip())
+        except Exception:
+            pass
+        for cached_plat in self._platform_cache.keys():
+            if cached_plat and str(cached_plat).strip() and str(cached_plat).strip() != "global":
+                ids.add(str(cached_plat).strip())
+        return ids
+
     async def _init_storage(self):
         """初始化存储并迁移数据"""
         try:
@@ -274,11 +301,16 @@ class FavourManagerTool(Star):
                 logger.info("检测到旧版会话好感度文件，开始迁移...")
                 await self.db_manager.migrate_from_json(old_local, is_global=False)
 
-            # 自动迁移旧 'global' 池到适配器前缀池（修复 #26）
+            # 自动迁移旧 'global' 池及旧别名池到 'platform:uid'（修复 #26 / #32 升级兼容）
             if self.is_global_favour:
-                migrated, skipped = await self.db_manager.auto_migrate_global_to_adapters()
+                known = self._get_known_platform_ids()
+                if known:
+                    self._deferred_migration_done = True
+                migrated, skipped = await self.db_manager.auto_migrate_global_to_adapters(
+                    known_platforms=known
+                )
                 if migrated > 0:
-                    logger.info(f"[启动迁移] 旧 'global' 池 → 适配器前缀池：合并 {migrated} 条，保留 {skipped} 条待兜底。")
+                    logger.info(f"[启动迁移] 旧共享记录规范化完成：迁移/合并 {migrated} 条，保留 {skipped} 条待认领。")
                 
         except Exception as e:
             logger.error(f"数据库初始化或迁移失败: {str(e)}\n{traceback.format_exc()}")
@@ -527,16 +559,35 @@ class FavourManagerTool(Star):
                         if datetime.now() < self.cold_violence_users[cv_key]:
                             continue
 
-                    # 同一目标会话 + 同一用户去重（例如同时存在全局记录与私聊记录时，优先取与当前 is_global_favour 模式一致的记录）
+                    # 同一目标会话 + 同一用户去重：
+                    # 1) 优先取与当前 is_global_favour 模式一致的记录；
+                    # 2) 同模式下，优先取更具体（platform:uid > platform > global）且好感度/最近互动更高的记录。
+                    def _cand_rank(rec_obj: FavourRecord) -> Tuple[int, int, int, datetime]:
+                        rsid = (rec_obj.session_id or "").strip()
+                        r_shared = self._is_shared_session(rsid)
+                        mode_match = 1 if (r_shared == bool(self.is_global_favour)) else 0
+                        if not r_shared:
+                            spec = 3
+                        elif ":" in rsid:
+                            spec = 2
+                        elif rsid != "global":
+                            spec = 1
+                        else:
+                            spec = 0
+                        return (
+                            mode_match,
+                            spec,
+                            rec_obj.favour,
+                            rec_obj.last_interaction or rec_obj.created_at or datetime.min,
+                        )
+
                     dedup_key = (target_sid, user_id)
                     prev_rec = seen_session_users.get(dedup_key)
                     if prev_rec is not None:
-                        prev_is_shared = self._is_shared_session(prev_rec.session_id)
-                        curr_is_shared = self._is_shared_session(raw_sid)
-                        if self.is_global_favour and curr_is_shared and not prev_is_shared:
-                            session_groups[target_sid] = [r for r in session_groups.get(target_sid, []) if str(r.user_id) != user_id]
-                        elif (not self.is_global_favour) and (not curr_is_shared) and prev_is_shared:
-                            session_groups[target_sid] = [r for r in session_groups.get(target_sid, []) if str(r.user_id) != user_id]
+                        if _cand_rank(record) > _cand_rank(prev_rec):
+                            session_groups[target_sid] = [
+                                r for r in session_groups.get(target_sid, []) if str(r.user_id) != user_id
+                            ]
                         else:
                             continue
                     seen_session_users[dedup_key] = record
@@ -721,7 +772,8 @@ class FavourManagerTool(Star):
                                 # aiocqhttp 平台走事件队列（完整管线：persona + 分段）;
                                 # 其他支持主动消息的平台直接调 LLM + 发送（send_message 平台无关路由）
                                 #################
-                                if platform.startswith("aiocqhttp"):
+                                meta_name = getattr(_platform_meta, "name", "") if _platform_meta else ""
+                                if platform.startswith("aiocqhttp") or str(meta_name).startswith("aiocqhttp"):
                                     self.context.get_event_queue().put_nowait(synth_event)
                                     logger.warning(f"[搭话结果] 触发 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 好感度 {record.favour} | 平台 {platform} | 路径=合成事件管线")
                                 else:
@@ -1781,7 +1833,7 @@ class FavourManagerTool(Star):
         - 平台全局会话（如 'aiocqhttp:123456'）：在平台名与用户ID之间插入 'FriendMessage'，
           拼接为 'aiocqhttp:FriendMessage:123456'。
         - 旧版适配器前缀会话（如 'aiocqhttp'）：与 record.user_id 拼接为 'aiocqhttp:FriendMessage:{user_id}'。
-        - 旧版 'global' 会话：若运行时 _platform_cache 已缓存适配器平台，则取首个可用平台拼接，否则返回 None。
+        - 旧版 'global' 会话或已改名的孤儿别名会话：仅当当前确定只有一个存活平台时，映射到该唯一平台拼接；否则跳过。
         """
         sid = (record.session_id or "").strip()
         uid = str(record.user_id or "").strip()
@@ -1789,19 +1841,36 @@ class FavourManagerTool(Star):
             return None
         if not self._is_shared_session(sid):
             return sid
+
+        known_fn = getattr(self, "_get_known_platform_ids", None)
+        known = known_fn() if callable(known_fn) else set(getattr(self, "_platform_cache", {}).keys())
+
         if ":" in sid:
             platform, target = sid.split(":", 1)
             platform = platform.strip()
             target = target.strip() or uid
             if not platform or platform == "global":
                 return None
+            if known and platform not in known:
+                if len(known) == 1:
+                    platform = next(iter(known))
+                else:
+                    return None
             return f"{platform}:FriendMessage:{target}"
         if sid == "global":
-            # 兜底：若运行时已有缓存的平台，使用首个支持主动消息的平台
-            for plat in self._platform_cache.keys():
-                if plat and plat != "global":
-                    return f"{plat}:FriendMessage:{uid}"
+            # 仅当当前确定只有一个可用平台时，才将 global 记录拼接到该平台
+            if len(known) == 1:
+                only = next(iter(known))
+                return f"{only}:FriendMessage:{uid}"
+            cache_plats = [p for p in getattr(self, "_platform_cache", {}).keys() if p and p != "global"]
+            if len(cache_plats) == 1:
+                return f"{cache_plats[0]}:FriendMessage:{uid}"
             return None
+        if known and sid not in known:
+            if len(known) == 1:
+                sid = next(iter(known))
+            else:
+                return None
         return f"{sid}:FriendMessage:{uid}"
 
     def _extract_mentioned_users(self, event: AstrMessageEvent, sender_uid: str) -> List[Tuple[str, str]]:
@@ -2367,6 +2436,13 @@ class FavourManagerTool(Star):
                     "platform_meta": event.platform_meta,
                     "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
                 }
+                if self.is_global_favour and not self._deferred_migration_done:
+                    self._deferred_migration_done = True
+                    asyncio.create_task(
+                        self.db_manager.auto_migrate_global_to_adapters(
+                            known_platforms=self._get_known_platform_ids()
+                        )
+                    )
         except Exception:
             pass
 
@@ -2393,6 +2469,13 @@ class FavourManagerTool(Star):
                         "platform_meta": event.platform_meta,
                         "self_id": getattr(event.message_obj, 'self_id', '') if hasattr(event, 'message_obj') else ''
                     }
+                    if self.is_global_favour and not self._deferred_migration_done:
+                        self._deferred_migration_done = True
+                        asyncio.create_task(
+                            self.db_manager.auto_migrate_global_to_adapters(
+                                known_platforms=self._get_known_platform_ids()
+                            )
+                        )
 
             if not self._is_shared_session(session_id):
                 if self.allowed_sessions and not self._session_in_list(session_id, self.allowed_sessions):
@@ -2746,9 +2829,7 @@ class FavourManagerTool(Star):
             session_id = self._get_session_id(event, target_uid=target_user_id)
             
             record = await self.db_manager.get_favour(target_user_id, session_id)
-            old_fav = record.favour if record else (
-                await self._get_initial_favour(event, target_uid=target_user_id) if target_user_id == sender_id else 0
-            )
+            old_fav = record.favour if record else await self._get_initial_favour(event, target_uid=target_user_id)
             
             new_fav = old_fav + data['change']
             new_fav = max(self.min_favour_value, min(self.max_favour_value, new_fav))
@@ -2852,7 +2933,7 @@ class FavourManagerTool(Star):
         
         session_id = self._get_session_id(event, target_uid=target_uid)
         record = await self.db_manager.get_favour(target_uid, session_id)
-        fav = record.favour if record else (await self._get_initial_favour(event, target_uid=target_uid) if target_uid == str(event.get_sender_id()) else 0)
+        fav = record.favour if record else await self._get_initial_favour(event, target_uid=target_uid)
         rel = record.relationship if record else "无"
         uniq = " (唯一)" if record and record.is_unique else ""
         

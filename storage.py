@@ -6,7 +6,7 @@ import json
 import asyncio
 import functools
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Callable, Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from aiofiles import open as aio_open
 from aiofiles.os import path as aio_path
@@ -79,6 +79,9 @@ class FavourDBManager:
         )
         self._initialized = False
         self._init_lock = asyncio.Lock()
+        # 由插件注入：返回当前确定存在的平台 ID 集合，用于识别“平台已不存在”的孤儿别名记录；
+        # 返回 None/空集合表示无法确定，此时不会认领孤儿别名（避免串号）。
+        self.platform_resolver: Optional[Callable[[], Optional[set]]] = None
 
     def set_limits(self, min_val: int, max_val: int) -> None:
         """热更新好感度边界（供 WebUI 配置保存后调用）。"""
@@ -254,30 +257,162 @@ class FavourDBManager:
             return True
         return sid.count(":") < 2
 
+    # ==================== 旧版共享记录兼容（alias / global / 孤儿别名） ====================
+    #
+    # 历史上共享（全局）记录的 session_id 出现过三种形态：
+    #   1. 'global'            —— v4.2.1 及以前的跨平台共享池
+    #   2. '<平台ID>'          —— v4.2.2~v4.4.11 的适配器共享池（平台 ID 即 UMO 第一段，可被用户改名）
+    #   3. '<平台ID>:<用户ID>' —— v4.4.12 起的新格式
+    # 读取/写入新格式 key 时，若未命中，必须按下列优先级“认领”旧记录，绝不能当作新用户从 0 创建：
+    #   alias（同平台旧前缀，直接改名迁移） > global（复制为种子，保留原行） > 孤儿别名（平台已不存在，复制，需能确认平台列表）
+
+    def _known_platforms(self, current: str) -> Optional[set]:
+        """返回当前确定存在的平台 ID 集合；无法可靠判断时返回 None。"""
+        if not self.platform_resolver:
+            return None
+        try:
+            ids = self.platform_resolver()
+        except Exception as e:
+            logger.debug(f"[旧数据兼容] 获取平台列表失败: {e}")
+            return None
+        if not ids:
+            return None
+        return {str(i) for i in ids if i} | {current}
+
+    def _active_other_platforms(self, current: str) -> set:
+        """返回除 current 以外当前确定存活的其他平台 ID 集合（无则返回空集合）。"""
+        known = self._known_platforms(current)
+        if not known:
+            return set()
+        return {p for p in known if p and p != current and p != "global"}
+
+    async def _find_legacy_rows(self, session, platform: str, user_id: str):
+        """查找某用户在当前平台之外可继承的旧版共享记录，返回 (alias_row, global_row, orphan_rows)。"""
+        alias = (await session.execute(select(FavourRecord).where(
+            FavourRecord.user_id == user_id, FavourRecord.session_id == platform
+        ))).scalars().first()
+        glob = (await session.execute(select(FavourRecord).where(
+            FavourRecord.user_id == user_id, FavourRecord.session_id == "global"
+        ))).scalars().first()
+
+        orphans: List[FavourRecord] = []
+        other_active = self._active_other_platforms(platform)
+        rows = (await session.execute(select(FavourRecord).where(
+            FavourRecord.user_id == user_id,
+            FavourRecord.session_id.not_like("%:%:%"),
+        ))).scalars().all()
+        for r in rows:
+            sid = r.session_id or ""
+            if sid in ("global", platform) or sid == f"{platform}:{user_id}":
+                continue
+            prefix = sid.split(":", 1)[0]
+            if not prefix or prefix in other_active:
+                continue
+            # 只接受 '别名' 或 '别名:本用户ID' 两种形态（如 '涩涩号'、'涩涩号:123456'、'default'）
+            if ":" in sid and sid != f"{prefix}:{user_id}":
+                continue
+            orphans.append(r)
+        return alias, glob, orphans
+
+    @staticmethod
+    def _latest_row(rows: List[FavourRecord]) -> Optional[FavourRecord]:
+        if not rows:
+            return None
+        return max(
+            rows,
+            key=lambda r: (
+                r.favour,
+                r.last_interaction or r.created_at or datetime.min,
+            ),
+        )
+
+    async def _claim_legacy(self, session, platform: str, user_id: str, target_sid: str) -> Optional[FavourRecord]:
+        """把旧版共享记录认领为 target_sid（'platform:user_id'）并落库，返回新记录；无旧记录返回 None。"""
+        alias, glob, orphans = await self._find_legacy_rows(session, platform, user_id)
+        now = datetime.now()
+        if alias is not None:
+            # 若同时还存在 global 或孤儿别名，将其中更高的好感/关系合并进 alias
+            for extra in [glob, *orphans]:
+                if extra is not None:
+                    self._merge_into(alias, extra, now)
+            # 同平台旧前缀：整行改名，保留全部字段与主键
+            alias.session_id = target_sid
+            alias.updated_at = now
+            session.add(alias)
+            try:
+                await session.commit()
+            except SAIntegrityError:
+                await session.rollback()
+                return (await session.execute(select(FavourRecord).where(
+                    FavourRecord.user_id == user_id, FavourRecord.session_id == target_sid
+                ))).scalars().first()
+            logger.info(f"[旧数据认领] 用户 {user_id}: '{platform}' → '{target_sid}'")
+            return alias
+
+        candidates = [r for r in [*orphans, glob] if r is not None]
+        if not candidates:
+            return None
+        primary = self._latest_row(candidates)
+        origin = primary.session_id
+        new_rec = FavourRecord(
+            user_id=user_id,
+            session_id=target_sid,
+            favour=max(self.min_val, min(self.max_val, primary.favour)),
+            relationship=primary.relationship or "",
+            is_unique=bool(primary.is_unique),
+            username=primary.username or "",
+            created_at=primary.created_at or now,
+            updated_at=now,
+            last_interaction=primary.last_interaction or now,
+        )
+        for extra in candidates:
+            if extra is not primary:
+                self._merge_into(new_rec, extra, now)
+        new_rec.favour = max(self.min_val, min(self.max_val, new_rec.favour))
+        session.add(new_rec)
+        try:
+            await session.commit()
+        except SAIntegrityError:
+            await session.rollback()
+            return (await session.execute(select(FavourRecord).where(
+                FavourRecord.user_id == user_id, FavourRecord.session_id == target_sid
+            ))).scalars().first()
+        logger.info(f"[旧数据认领] 用户 {user_id}: 复制 '{origin}' → '{target_sid}'（保留原行作为种子）")
+        return new_rec
+
+    async def _peek_legacy(self, user_id: str, platform: str) -> Optional[FavourRecord]:
+        """只读兜底：认领写库失败时仍返回可用的旧记录，防止被当成新用户重置。"""
+        try:
+            async with self.async_session() as session:
+                alias, glob, orphans = await self._find_legacy_rows(session, platform, user_id)
+                return alias or glob or self._latest_row(orphans)
+        except Exception as e:
+            logger.warning(f"[旧数据兼容] 只读回退查询失败: {e}")
+            return None
+
     async def get_favour(self, user_id: str, session_id: Optional[str] = None) -> Optional[FavourRecord]:
-        """获取好感度记录（自动兼容旧版 'platform' 适配器前缀记录）"""
+        """获取好感度记录。
+
+        查询新版平台全局键 'platform:user_id' 未命中时，会按 alias > global > 孤儿别名 的顺序认领旧记录，
+        避免旧版共享数据在升级后被当成新用户。
+        """
         await self.init_db()
         sid = session_id if session_id else "global"
         async with self.async_session() as session:
-            stmt = select(FavourRecord).where(
+            rec = (await session.execute(select(FavourRecord).where(
                 FavourRecord.user_id == user_id,
                 FavourRecord.session_id == sid
-            )
-            result = await session.execute(stmt)
-            rec = result.scalars().first()
-            if rec is not None:
+            ))).scalars().first()
+            if rec is not None or sid.count(":") != 1:
                 return rec
-            # 兼容：若查询新版平台全局 'platform:user_id' 未命中，回退查询旧版 'platform'
-            if sid.count(":") == 1:
-                platform_prefix = sid.split(":", 1)[0]
-                if platform_prefix and platform_prefix != "global":
-                    stmt_legacy = select(FavourRecord).where(
-                        FavourRecord.user_id == user_id,
-                        FavourRecord.session_id == platform_prefix
-                    )
-                    res_legacy = await session.execute(stmt_legacy)
-                    return res_legacy.scalars().first()
-            return None
+            platform = sid.split(":", 1)[0]
+            if not platform or platform == "global":
+                return None
+            try:
+                return await self._claim_legacy(session, platform, user_id, sid)
+            except Exception as e:
+                logger.warning(f"[旧数据认领] 写库失败，改为只读回退: {e}")
+        return await self._peek_legacy(user_id, platform)
 
     @_retry_on_locked()
     async def update_favour(
@@ -305,19 +440,11 @@ class FavourDBManager:
                 result = await session.execute(stmt)
                 record = result.scalars().first()
 
-                # 兼容旧版适配器前缀记录（如 'aiocqhttp' 升级为 'aiocqhttp:123456'）
+                # 兼容旧版共享记录：alias 改名 / global 与孤儿别名复制，保证写入基于旧数据而非从 0 创建
                 if not record and sid.count(":") == 1:
                     platform_prefix = sid.split(":", 1)[0]
                     if platform_prefix and platform_prefix != "global":
-                        stmt_legacy = select(FavourRecord).where(
-                            FavourRecord.user_id == user_id,
-                            FavourRecord.session_id == platform_prefix
-                        )
-                        res_legacy = await session.execute(stmt_legacy)
-                        legacy_rec = res_legacy.scalars().first()
-                        if legacy_rec:
-                            legacy_rec.session_id = sid
-                            record = legacy_rec
+                        record = await self._claim_legacy(session, platform_prefix, user_id, sid)
 
                 now = datetime.now()
                 if not record:
@@ -406,43 +533,36 @@ class FavourDBManager:
 
     @_retry_on_locked()
     async def delete_favour(self, user_id: str, session_id: Optional[str] = None) -> Tuple[bool, str]:
-        """删除单条记录（兼容旧版适配器前缀格式）"""
+        """删除单条记录。
+
+        删除平台全局键 'platform:user_id' 时，会连同该用户的旧版 alias / global / 孤儿别名行一并清除，
+        否则被删记录会在下次读取时从旧数据“复活”。
+        """
         await self.init_db()
         sid = session_id if session_id else "global"
         try:
             async with self.async_session() as session:
-                stmt = select(FavourRecord).where(
+                targets: Dict[int, FavourRecord] = {}
+                exact = (await session.execute(select(FavourRecord).where(
                     FavourRecord.user_id == user_id,
                     FavourRecord.session_id == sid
-                )
-                result = await session.execute(stmt)
-                record = result.scalars().first()
+                ))).scalars().first()
+                if exact is not None:
+                    targets[exact.id] = exact
 
-                if not record and sid.count(":") == 1:
-                    platform_prefix = sid.split(":", 1)[0]
-                    if platform_prefix and platform_prefix != "global":
-                        res_legacy = await session.execute(
-                            select(FavourRecord).where(
-                                FavourRecord.user_id == user_id,
-                                FavourRecord.session_id == platform_prefix
-                            )
-                        )
-                        record = res_legacy.scalars().first()
-
-                if not record:
-                    return False, "未找到记录"
-
-                await session.delete(record)
-                # 若同时还残留旧版 'platform' 行，一并清理避免脏数据回退
                 if sid.count(":") == 1:
                     platform_prefix = sid.split(":", 1)[0]
                     if platform_prefix and platform_prefix != "global":
-                        await session.execute(
-                            delete(FavourRecord).where(
-                                FavourRecord.user_id == user_id,
-                                FavourRecord.session_id == platform_prefix
-                            )
-                        )
+                        alias, glob, orphans = await self._find_legacy_rows(session, platform_prefix, user_id)
+                        for r in [alias, glob, *orphans]:
+                            if r is not None:
+                                targets[r.id] = r
+
+                if not targets:
+                    return False, "未找到记录"
+
+                for r in targets.values():
+                    await session.delete(r)
                 await session.commit()
                 return True, "删除成功"
         except Exception as e:
@@ -450,7 +570,12 @@ class FavourDBManager:
             return False, f"数据库错误: {str(e)}"
 
     async def get_all_in_session(self, session_id: Optional[str] = None) -> List[FavourRecord]:
-        """获取某会话下的所有记录（若传入平台前缀或 'platform:uid'，则返回该平台下所有全局记录）"""
+        """获取某会话下的所有记录。
+
+        传入独立会话 UMO 或 'global'：精确匹配。
+        传入平台名或 'platform:uid'：返回该平台的“平台视图”——
+          汇总新版 'platform:uid'、旧版 'platform'、旧版 'global' 种子以及非其他存活平台的孤儿别名记录，按用户去重。
+        """
         await self.init_db()
         sid = session_id if session_id else "global"
         async with self.async_session() as session:
@@ -458,24 +583,43 @@ class FavourDBManager:
                 stmt = select(FavourRecord).where(FavourRecord.session_id == sid)
                 result = await session.execute(stmt)
                 return list(result.scalars().all())
-            # 平台级全局会话（如 'aiocqhttp' 或 'aiocqhttp:123456'）：汇总该平台下全部全局记录
+
             platform_prefix = sid.split(":", 1)[0]
-            stmt = select(FavourRecord).where(
-                (FavourRecord.session_id == platform_prefix)
-                | (
-                    FavourRecord.session_id.like(f"{platform_prefix}:%")
-                    & FavourRecord.session_id.not_like("%:%:%")
-                )
-            )
-            result = await session.execute(stmt)
-            rows = list(result.scalars().all())
-            # 按 user_id 去重，优先保留新版 'platform:uid' 格式
-            dedup: Dict[str, FavourRecord] = {}
-            for r in rows:
-                prev = dedup.get(r.user_id)
-                if prev is None or (":" in (r.session_id or "") and ":" not in (prev.session_id or "")):
-                    dedup[r.user_id] = r
-            return list(dedup.values())
+            other_active = self._active_other_platforms(platform_prefix)
+            all_shared = list((await session.execute(select(FavourRecord).where(
+                FavourRecord.session_id.not_like("%:%:%")
+            ))).scalars().all())
+
+        # 过滤掉明确属于“其他当前存活平台”的记录，其余（当前平台 + global + 孤儿别名）均纳入当前平台视图
+        candidate_rows: List[FavourRecord] = []
+        for r in all_shared:
+            s = r.session_id or ""
+            if s == "global" or s == platform_prefix or s.startswith(f"{platform_prefix}:"):
+                candidate_rows.append(r)
+                continue
+            prefix = s.split(":", 1)[0]
+            if prefix and prefix not in other_active:
+                candidate_rows.append(r)
+
+        # 优先级：platform:uid (3) > platform (2) > 孤儿别名 (1) > global (0)
+        def _rank(r: FavourRecord) -> Tuple[int, int]:
+            s = r.session_id or ""
+            if s.startswith(f"{platform_prefix}:"):
+                tier = 3
+            elif s == platform_prefix:
+                tier = 2
+            elif s == "global":
+                tier = 0
+            else:
+                tier = 1
+            return (tier, r.favour)
+
+        dedup: Dict[str, FavourRecord] = {}
+        for r in candidate_rows:
+            prev = dedup.get(r.user_id)
+            if prev is None or _rank(r) > _rank(prev):
+                dedup[r.user_id] = r
+        return list(dedup.values())
 
     async def get_global_records(self) -> List[FavourRecord]:
         """获取所有共享记录（旧版 'global'、旧版适配器前缀 'aiocqhttp'、以及新版 'aiocqhttp:123456'）。
@@ -539,23 +683,39 @@ class FavourDBManager:
 
     @_retry_on_locked()
     async def clear_session(self, session_id: Optional[str] = None) -> bool:
-        """清空某会话记录（若为平台全局会话，则清空该平台下全部全局记录）"""
+        """清空某会话记录。
+
+        平台视图（平台名或 'platform:uid'）会清空该平台全部共享记录，并清除视图内用户对应的 'global' 种子行，
+        否则被清空的用户会从 global 种子重新认领回来。
+        """
         await self.init_db()
         sid = session_id if session_id else "global"
         try:
             async with self.async_session() as session:
                 if sid == "global" or sid.count(":") >= 2:
-                    stmt = delete(FavourRecord).where(FavourRecord.session_id == sid)
+                    await session.execute(delete(FavourRecord).where(FavourRecord.session_id == sid))
                 else:
                     platform_prefix = sid.split(":", 1)[0]
-                    stmt = delete(FavourRecord).where(
+                    plat_filter = (
                         (FavourRecord.session_id == platform_prefix)
                         | (
                             FavourRecord.session_id.like(f"{platform_prefix}:%")
                             & FavourRecord.session_id.not_like("%:%:%")
                         )
                     )
-                await session.execute(stmt)
+                    plat_rows = (await session.execute(select(FavourRecord).where(plat_filter))).scalars().all()
+                    uids = {r.user_id for r in plat_rows}
+                    # 视图内尚未认领、仅存在于 global 的用户也属于“当前平台视图”
+                    glob_rows = (await session.execute(select(FavourRecord).where(
+                        FavourRecord.session_id == "global"
+                    ))).scalars().all()
+                    uids |= {r.user_id for r in glob_rows}
+                    await session.execute(delete(FavourRecord).where(plat_filter))
+                    if uids:
+                        await session.execute(delete(FavourRecord).where(
+                            FavourRecord.session_id == "global",
+                            FavourRecord.user_id.in_(list(uids)),
+                        ))
                 await session.commit()
                 return True
         except Exception as e:
@@ -947,111 +1107,186 @@ class FavourDBManager:
         logger.info(f"[会话迁移] {full_msg}")
         return True, full_msg, count
 
+    # ==================== 启动迁移（旧版共享记录 → platform:user_id） ====================
+
+    @staticmethod
+    def _merge_into(dst: "FavourRecord", src: "FavourRecord", now: datetime) -> None:
+        """把旧记录 src 合并进目标记录 dst：
+        - 好感度：若 src 好感度高于 dst（或 dst 为 0 而 src 非 0），取 src.favour，以修复升级后被重置为初值的情况；
+        - 关系/唯一/昵称：保留非空有值的一方；
+        - 时间：创建时间取较早者，最后互动时间取较晚者。
+        """
+        if src.favour > dst.favour or (dst.favour == 0 and src.favour != 0):
+            dst.favour = src.favour
+        src_rel = src.relationship if (src.relationship and src.relationship != "无") else ""
+        dst_rel = dst.relationship if (dst.relationship and dst.relationship != "无") else ""
+        if src_rel and (not dst_rel or src.favour >= dst.favour):
+            dst.relationship = src_rel
+        dst.is_unique = bool(dst.is_unique or src.is_unique)
+        if not dst.username and src.username:
+            dst.username = src.username
+        if src.created_at and (not dst.created_at or src.created_at < dst.created_at):
+            dst.created_at = src.created_at
+        if src.last_interaction and (not dst.last_interaction or src.last_interaction > dst.last_interaction):
+            dst.last_interaction = src.last_interaction
+        dst.updated_at = now
+
+    async def _snapshot_before_migration(self, tag: str) -> Optional[str]:
+        """迁移前整库快照：任何改写数据的迁移之前必须先留底，出错可由 WebUI「备份快照」一键恢复。"""
+        try:
+            records = await self.get_all_records()
+            return await self.backup_data(records, f"pre_migrate_{tag}")
+        except Exception as e:
+            logger.error(f"[全局迁移] 迁移前快照失败: {e}")
+            return None
+
     @_retry_on_locked()
-    async def auto_migrate_global_to_adapters(self) -> Tuple[int, int]:
-        """一次性将旧版 'global' 池及纯适配器名（如 'aiocqhttp'）自动迁移/规范化为 'platform:user_id'（如 'aiocqhttp:123456'）。
+    async def auto_migrate_global_to_adapters(
+        self, known_platforms: Optional[set] = None
+    ) -> Tuple[int, int]:
+        """启动或首次发现平台时，把旧版共享记录规范化/合并为 'platform:user_id'（如 'aiocqhttp:123456'）。
 
-        迁移策略：
-          1. 将旧版纯适配器名记录（session_id='aiocqhttp'）升级为 'aiocqhttp:{user_id}'（若已存在则合并取较高好感度后删除旧行）。
-          2. 遍历 global 池中的每个 user_id，若在平台全局池中已有记录则合并后删除 global 记录；若无则保留供首次交互时兜底继承。
+        设计原则：**只合并、不丢弃**。任何无法确定归属的记录都原样保留，由运行时 get_favour 按需认领。
 
-        Returns: (migrated_count, skipped_count)
+        迁移步骤（均在迁移前先做整库快照）：
+          1. 平台别名记录（session_id 不含 ':'，且不是 'global'，如 'aiocqhttp' / '涩涩号'）
+             → 改写为 '<别名>:<user_id>'；目标已存在则合并后删除旧行。
+          2. 跨池恢复与单平台收口：
+             - 若某用户已存在当前存活平台的 '<platform>:<user_id>' 记录，同时还残留 'global' 或孤儿别名记录，
+               将旧记录合并进 '<platform>:<user_id>'（自动修复因早期未回退而新建的 0 好感记录）。
+             - 若当前仅有一个存活平台 `only`，将所有剩余 'global' 与孤儿别名记录直接迁入 `only:<user_id>`。
+             - 若存在多个平台或平台尚未确定，保留 'global' 行供运行时按需复制认领。
+
+        Returns: (migrated_count, kept_count)  kept_count 为保留待运行时认领的记录数。
         """
         await self.init_db()
         migrated = 0
-        skipped = 0
+        kept = 0
 
         try:
-            now = datetime.now()
-            # Step 1: 将纯适配器前缀 'platform' 升级为 'platform:user_id'
+            platforms = {str(p) for p in (known_platforms or []) if p and str(p) != "global"}
+            if not platforms and self.platform_resolver:
+                try:
+                    resolved = self.platform_resolver() or set()
+                    platforms = {str(p) for p in resolved if p and str(p) != "global"}
+                except Exception:
+                    platforms = set()
+
             async with self.async_session() as session:
-                stmt_legacy = select(FavourRecord).where(
-                    FavourRecord.session_id.not_like('%:%'),
+                alias_rows = list((await session.execute(select(FavourRecord).where(
+                    FavourRecord.session_id.not_like("%:%"),
                     FavourRecord.session_id != "global",
-                )
-                legacy_rows = list((await session.execute(stmt_legacy)).scalars().all())
-                for l_rec in legacy_rows:
-                    new_sid = f"{l_rec.session_id}:{l_rec.user_id}"
-                    stmt_target = select(FavourRecord).where(
-                        FavourRecord.user_id == l_rec.user_id,
+                ))).scalars().all())
+                global_rows = list((await session.execute(select(FavourRecord).where(
+                    FavourRecord.session_id == "global"
+                ))).scalars().all())
+                colon_shared_rows = list((await session.execute(select(FavourRecord).where(
+                    FavourRecord.session_id.like("%:%"),
+                    FavourRecord.session_id.not_like("%:%:%"),
+                ))).scalars().all())
+
+            # 识别孤儿别名行（仅当已知存活平台集合非空时，不属于任何存活平台的 prefix:uid）
+            orphan_colon_rows = [
+                r for r in colon_shared_rows
+                if platforms and (r.session_id or "").split(":", 1)[0] not in platforms
+            ]
+
+            if not alias_rows and not global_rows and not orphan_colon_rows:
+                return 0, 0
+
+            snap = await self._snapshot_before_migration("v4_4_13")
+            if snap:
+                logger.info(f"[全局迁移] 已在迁移前创建整库快照: {snap}")
+            else:
+                logger.warning("[全局迁移] 未能创建迁移前快照，为数据安全本次跳过迁移（运行时仍会按需认领旧记录）。")
+                return 0, len(alias_rows) + len(global_rows)
+
+            now = datetime.now()
+            async with self.async_session() as session:
+                # ---- Step 1：0 冒号别名记录原地改名为 alias:uid ----
+                for rec in alias_rows:
+                    new_sid = f"{rec.session_id}:{rec.user_id}"
+                    target = (await session.execute(select(FavourRecord).where(
+                        FavourRecord.user_id == rec.user_id,
                         FavourRecord.session_id == new_sid,
-                    )
-                    t_rec = (await session.execute(stmt_target)).scalars().first()
-                    if t_rec:
-                        if l_rec.favour > t_rec.favour:
-                            t_rec.favour = l_rec.favour
-                            if l_rec.relationship and l_rec.relationship != "无":
-                                t_rec.relationship = l_rec.relationship
-                            t_rec.is_unique = l_rec.is_unique or t_rec.is_unique
-                            t_rec.updated_at = now
-                            session.add(t_rec)
-                        await session.delete(l_rec)
+                    ))).scalars().first()
+                    if target is not None:
+                        self._merge_into(target, rec, now)
+                        session.add(target)
+                        await session.delete(rec)
                     else:
-                        l_rec.session_id = new_sid
-                        l_rec.updated_at = now
-                        session.add(l_rec)
+                        rec.session_id = new_sid
+                        rec.updated_at = now
+                        session.add(rec)
                     migrated += 1
-                if legacy_rows:
+                if alias_rows:
                     await session.commit()
 
-            # Step 2: 获取 global 池所有记录并合并到平台全局池
-            global_records = await self.get_all_in_session("global")
-            if not global_records:
-                if migrated > 0:
-                    logger.info(f"[全局迁移] 已将 {migrated} 条旧适配器前缀记录升级为 'platform:uid' 格式。")
-                return migrated, 0
-
+            # ---- Step 2：global 记录与孤儿别名记录合并/收口 ----
             async with self.async_session() as session:
-                stmt = select(FavourRecord).where(
-                    FavourRecord.session_id.not_like('%:%:%'),
-                    FavourRecord.session_id != "global",
-                )
-                result = await session.execute(stmt)
-                adapter_records = list(result.scalars().all())
+                all_shared_now = list((await session.execute(select(FavourRecord).where(
+                    FavourRecord.session_id.not_like("%:%:%")
+                ))).scalars().all())
 
-            adapter_by_user: Dict[str, List[FavourRecord]] = {}
-            for rec in adapter_records:
-                adapter_by_user.setdefault(rec.user_id, []).append(rec)
+                if len(platforms) == 1:
+                    only = next(iter(platforms))
+                    legacy_sources = [
+                        r for r in all_shared_now
+                        if r.session_id == "global" or (r.session_id or "").split(":", 1)[0] != only
+                    ]
+                    for src_rec in legacy_sources:
+                        new_sid = f"{only}:{src_rec.user_id}"
+                        if src_rec.session_id == new_sid:
+                            continue
+                        target = (await session.execute(select(FavourRecord).where(
+                            FavourRecord.user_id == src_rec.user_id,
+                            FavourRecord.session_id == new_sid,
+                        ))).scalars().first()
+                        if target is not None:
+                            self._merge_into(target, src_rec, now)
+                            session.add(target)
+                            await session.delete(src_rec)
+                        else:
+                            src_rec.session_id = new_sid
+                            src_rec.updated_at = now
+                            session.add(src_rec)
+                        migrated += 1
+                    if legacy_sources:
+                        await session.commit()
+                        logger.info(
+                            f"[全局迁移] 单平台 '{only}'：已将 {len(legacy_sources)} 条旧 'global'/旧别名记录迁入或合并到 '{only}:UID'。"
+                        )
+                else:
+                    # 多平台或平台尚未加载：若用户在已知存活平台下已有记录，将 global 记录合并进去修复好感/关系
+                    active_by_user: Dict[str, List[FavourRecord]] = {}
+                    curr_globals: List[FavourRecord] = []
+                    for r in all_shared_now:
+                        if r.session_id == "global":
+                            curr_globals.append(r)
+                        elif ":" in (r.session_id or ""):
+                            plat_p = (r.session_id or "").split(":", 1)[0]
+                            if not platforms or plat_p in platforms:
+                                active_by_user.setdefault(r.user_id, []).append(r)
 
-            global_ids_to_delete: List[int] = []
+                    for g in curr_globals:
+                        targets = active_by_user.get(g.user_id, [])
+                        if not targets:
+                            kept += 1
+                            continue
+                        for t in targets:
+                            self._merge_into(t, g, now)
+                            session.add(t)
+                        if platforms and len(targets) >= len(platforms):
+                            await session.delete(g)
+                        else:
+                            kept += 1
+                        migrated += 1
+                    await session.commit()
 
-            async with self.async_session() as session:
-                for g_rec in global_records:
-                    user_adapter_recs = adapter_by_user.get(g_rec.user_id, [])
-                    if not user_adapter_recs:
-                        skipped += 1
-                        continue
-
-                    for a_rec in user_adapter_recs:
-                        if g_rec.favour > a_rec.favour:
-                            stmt_upd = (
-                                update(FavourRecord)
-                                .where(FavourRecord.id == a_rec.id)
-                                .values(
-                                    favour=g_rec.favour,
-                                    relationship=g_rec.relationship if (g_rec.relationship and g_rec.relationship != "无") else a_rec.relationship,
-                                    is_unique=g_rec.is_unique or a_rec.is_unique,
-                                    created_at=min(g_rec.created_at or now, a_rec.created_at or now),
-                                    updated_at=now,
-                                )
-                            )
-                            await session.execute(stmt_upd)
-
-                    global_ids_to_delete.append(g_rec.id)
-                    migrated += 1
-
-                if global_ids_to_delete:
-                    await session.execute(
-                        delete(FavourRecord).where(FavourRecord.id.in_(global_ids_to_delete))
-                    )
-
-                await session.commit()
-
-            if migrated > 0:
-                logger.info(f"[全局迁移] 已完成 {migrated} 条平台全局记录迁移/合并，"
-                            f"跳过 {skipped} 条（无对应适配器池记录，保留供兜底继承）。")
-            return migrated, skipped
+            if migrated or kept:
+                logger.info(f"[全局迁移] 完成：迁移/合并 {migrated} 条，保留待认领 {kept} 条。")
+            return migrated, kept
 
         except Exception as e:
-            logger.error(f"[全局迁移] 自动迁移 global→适配器前缀 失败: {e}")
+            logger.error(f"[全局迁移] 自动迁移失败（数据未丢失，已有快照可恢复）: {e}")
             return 0, 0
