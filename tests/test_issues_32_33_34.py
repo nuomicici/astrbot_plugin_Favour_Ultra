@@ -1,7 +1,7 @@
-"""针对 Issue #32、#33、#34 的回归单元测试。"""
+"""针对 Issue #32、#33、#34 及旧版 global/适配器别名兼容性的回归单元测试。"""
 import ast
+import importlib
 import logging
-import re
 import sys
 import tempfile
 import types
@@ -11,6 +11,15 @@ from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    import aiofiles  # noqa: F401
+    import aiosqlite  # noqa: F401
+    import greenlet  # noqa: F401
+    import sqlmodel  # noqa: F401
+    HAS_DB_DEPS = True
+except ImportError:
+    HAS_DB_DEPS = False
 
 
 class FakeAt:
@@ -110,6 +119,7 @@ class Issues32To34Tests(unittest.IsolatedAsyncioTestCase):
         stub._get_initial_favour = types.MethodType(self.ns["_get_initial_favour"], stub)
         stub._check_permission = AsyncMock(return_value=False)
         stub._get_user_display_name = AsyncMock(side_effect=lambda evt, uid: f"昵称_{uid}")
+        stub._get_known_platform_ids = lambda: {"aiocqhttp"}
         return stub
 
     def test_issue32_global_session_id_and_proactive_umo_splicing(self):
@@ -129,9 +139,13 @@ class Issues32To34Tests(unittest.IsolatedAsyncioTestCase):
         rec_new = types.SimpleNamespace(session_id="aiocqhttp:123456", user_id="123456")
         self.assertEqual(stub._resolve_proactive_target_umo(rec_new), "aiocqhttp:FriendMessage:123456")
 
-        # 兼容旧版纯平台名记录（如 aiocqhttp）
+        # 兼容旧版纯平台名记录（如 aiocqhttp）及已改名孤儿别名（单平台下自动映射）
         rec_legacy = types.SimpleNamespace(session_id="aiocqhttp", user_id="123456")
         self.assertEqual(stub._resolve_proactive_target_umo(rec_legacy), "aiocqhttp:FriendMessage:123456")
+        rec_alias = types.SimpleNamespace(session_id="涩涩号", user_id="123456")
+        self.assertEqual(stub._resolve_proactive_target_umo(rec_alias), "aiocqhttp:FriendMessage:123456")
+        rec_global = types.SimpleNamespace(session_id="global", user_id="123456")
+        self.assertEqual(stub._resolve_proactive_target_umo(rec_global), "aiocqhttp:FriendMessage:123456")
 
         # 独立会话（非全局）保持原样
         rec_group = types.SimpleNamespace(session_id="aiocqhttp:GroupMessage:99999", user_id="123456")
@@ -144,7 +158,6 @@ class Issues32To34Tests(unittest.IsolatedAsyncioTestCase):
             node for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef) and node.name == "is_shared_session_id"
         )
-        # 移除 @staticmethod 装饰器以便直接编译调用
         method.decorator_list = []
         from typing import Optional
         ns = {"Optional": Optional}
@@ -153,19 +166,95 @@ class Issues32To34Tests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(is_shared("global"))
         self.assertTrue(is_shared("aiocqhttp"))
+        self.assertTrue(is_shared("涩涩号"))
         self.assertTrue(is_shared("aiocqhttp:123456"))
         self.assertFalse(is_shared("aiocqhttp:FriendMessage:123456"))
         self.assertFalse(is_shared("aiocqhttp:GroupMessage:99999"))
+
+    @unittest.skipUnless(HAS_DB_DEPS, "需要 sqlmodel/aiosqlite/aiofiles 依赖")
+    async def test_legacy_global_and_alias_claim_and_migration_zero_loss(self):
+        pkg = types.ModuleType("astrbot_plugin_Favour_Ultra")
+        pkg.__path__ = [str(ROOT)]
+        with patch.dict(sys.modules, {"astrbot_plugin_Favour_Ultra": pkg}):
+            storage_mod = importlib.import_module("astrbot_plugin_Favour_Ultra.storage")
+            FavourDBManager = storage_mod.FavourDBManager
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db = FavourDBManager(Path(tmpdir), min_val=-200, max_val=1000)
+                db.platform_resolver = lambda: {"aiocqhttp", "telegram"}
+                await db.init_db()
+
+                # 1. 旧版 global 记录：首次通过 aiocqhttp:10001 查询时应完整认领（好感+关系+唯一性）
+                await db.update_favour("10001", "global", favour=320, relationship="恋人", is_unique=True)
+                claimed_g = await db.get_favour("10001", "aiocqhttp:10001")
+                self.assertIsNotNone(claimed_g)
+                self.assertEqual(claimed_g.session_id, "aiocqhttp:10001")
+                self.assertEqual(claimed_g.favour, 320)
+                self.assertEqual(claimed_g.relationship, "恋人")
+                self.assertTrue(claimed_g.is_unique)
+
+                # 2. 旧版适配器别名记录（如 '涩涩号'，不再属于存活平台列表）：
+                #    通过当前平台 'aiocqhttp:20002' 查询或更新时应自动认领，不归零
+                await db.update_favour("20002", "涩涩号", favour=180, relationship="挚友", is_unique=False)
+                claimed_alias = await db.get_favour("20002", "aiocqhttp:20002")
+                self.assertIsNotNone(claimed_alias)
+                self.assertEqual(claimed_alias.session_id, "aiocqhttp:20002")
+                self.assertEqual(claimed_alias.favour, 180)
+                self.assertEqual(claimed_alias.relationship, "挚友")
+
+                # 3. 另一存活平台（如 'telegram:30003'）的数据绝不能被 'aiocqhttp' 误认领
+                await db.update_favour("30003", "telegram:30003", favour=95, relationship="搭档")
+                cross_rec = await db.get_favour("30003", "aiocqhttp:30003")
+                self.assertIsNone(cross_rec)
+
+                # 4. /查询当前好感度 使用的 get_all_in_session("aiocqhttp") 应包含未认领的 global 与孤儿别名用户
+                await db.update_favour("40004", "global", favour=260, relationship="青梅竹马")
+                await db.update_favour("50005", "default", favour=150, relationship="损友")
+                plat_view = await db.get_all_in_session("aiocqhttp")
+                by_uid = {r.user_id: r for r in plat_view}
+                self.assertIn("10001", by_uid)
+                self.assertIn("20002", by_uid)
+                self.assertIn("40004", by_uid)
+                self.assertEqual(by_uid["40004"].favour, 260)
+                self.assertIn("50005", by_uid)
+                self.assertEqual(by_uid["50005"].favour, 150)
+                self.assertNotIn("30003", by_uid)  # telegram 存活平台用户不混入 aiocqhttp 视图
+
+                # 5. 修复已在 v4.4.12 被重置为初值的用户：
+                #    假设用户 60006 在 global 有 500 好感/老婆，但升级后发消息新建了 aiocqhttp:60006 (好感 2, 关系空)
+                await db.update_favour("60006", "global", favour=500, relationship="老婆", is_unique=True)
+                await db.update_favour("60006", "aiocqhttp:60006", favour=2, relationship="", is_unique=False)
+                # 执行单平台或双平台自动迁移修复
+                migrated, _ = await db.auto_migrate_global_to_adapters(known_platforms={"aiocqhttp"})
+                self.assertGreater(migrated, 0)
+                repaired = await db.get_favour("60006", "aiocqhttp:60006")
+                self.assertIsNotNone(repaired)
+                self.assertEqual(repaired.favour, 500)
+                self.assertEqual(repaired.relationship, "老婆")
+                self.assertTrue(repaired.is_unique)
+
+                # 验证迁移前自动生成了整库备份快照
+                backups = await db.list_backups()
+                self.assertTrue(any(b["filename"].startswith("pre_migrate_") for b in backups))
+
+                await db.engine.dispose()
 
     def test_issue33_webui_switch_active_class_and_css(self):
         app_js = (ROOT / "pages" / "settings" / "app.js").read_text(encoding="utf-8")
         style_css = (ROOT / "pages" / "settings" / "style.css").read_text(encoding="utf-8")
 
-        # 确认 app.js 在 checkbox 变化时同步切换 switch-card 的 active 类
         self.assertIn("card.classList.toggle('active', el.checked)", app_js)
-        # 确认 style.css 不再让未勾选的 .switch-card.active 强制覆盖关闭状态
         self.assertNotIn("\n.switch-card.active .switch-ctrl {", style_css)
         self.assertIn('input[type="checkbox"]:checked + .switch-card .switch-ctrl', style_css)
+
+        # 验证数据中心黄色提醒框与快速迁移指引、未保存改动回退检测与版本号 4.4.13
+        self.assertIn('id="legacy-global-alert"', app_js)
+        self.assertIn('jumpToLegacyMigrate', app_js)
+        self.assertIn('.legacy-global-alert', style_css)
+        self.assertIn('function isConfigEqual(a, b)', app_js)
+        self.assertIn('function syncDirtyState()', app_js)
+        meta_text = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
+        self.assertIn("version: v4.4.13", meta_text)
 
     async def test_issue34_mentioned_users_favour_context(self):
         stub = self._make_plugin_stub(is_global=False)
@@ -182,7 +271,6 @@ class Issues32To34Tests(unittest.IsolatedAsyncioTestCase):
             get_favour=AsyncMock(side_effect=lambda uid, sid: records_map.get((uid, sid)))
         )
 
-        # 构造包含 @Bot、@发送者自己、@全体、重复@Alice、以及无记录用户 @Bob 的消息
         components = [
             FakeAt(qq="88888", name="Bot"),        # Bot 自身 -> 应忽略
             FakePlain(" 你觉得 "),

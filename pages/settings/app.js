@@ -145,19 +145,58 @@ function markDirty(dirty = true) {
   }
 }
 
+function normalizeForCompare(val) {
+  if (val === undefined || val === null) return null;
+  if (typeof val === 'string') {
+    return val.replace(/\r\n/g, '\n');
+  }
+  if (Array.isArray(val)) {
+    return val.map(normalizeForCompare);
+  }
+  if (typeof val === 'object') {
+    const out = {};
+    Object.keys(val)
+      .filter((k) => !k.startsWith('_') && k !== 'session_sync')
+      .sort()
+      .forEach((k) => {
+        const v = normalizeForCompare(val[k]);
+        if (v !== null) {
+          out[k] = v;
+        }
+      });
+    return out;
+  }
+  return val;
+}
+
+function isConfigEqual(a, b) {
+  return JSON.stringify(normalizeForCompare(a)) === JSON.stringify(normalizeForCompare(b));
+}
+
+function syncDirtyState() {
+  collectFormData();
+  const dirty = !isConfigEqual(config, originalConfig);
+  markDirty(dirty);
+}
+
 // ==================== 初始化与数据加载 ====================
 
 async function init() {
   try {
     setStatus('正在连接...', 'loading');
     config = await apiGet('config');
+    if (config && config.advanced_config && typeof config.advanced_config.dynamic_prompt_template === 'string') {
+      config.advanced_config.dynamic_prompt_template = config.advanced_config.dynamic_prompt_template
+        .replace(/\r\n/g, '\n')
+        .replace(/\n+$/, '');
+    }
     originalConfig = deepClone(config);
 
     // 动态读取并展示插件真实版本号
     const verTag = document.getElementById('brand-version-tag');
     if (verTag) {
       const bridge = getBridge();
-      const ver = config._plugin_version || (bridge && bridge.context && bridge.context.version) || 'v4.4.5';
+      const ver = config._plugin_version || (bridge && bridge.context && bridge.context.version) || 'v4.4.13';
       verTag.textContent = ver.startsWith('v') ? ver : 'v' + ver;
     }
 
@@ -177,7 +216,7 @@ function setupNavTabs() {
   const tabs = document.querySelectorAll('#tabs .nav-tab');
   tabs.forEach((tab) => {
     tab.onclick = () => {
-      collectFormData();
+      syncDirtyState();
       tabs.forEach((t) => t.classList.remove('on'));
       tab.classList.add('on');
       renderTab(tab.dataset.t);
@@ -1099,6 +1138,16 @@ let _dataFilterType = 'all'; // 'all' | 'private' | 'group' | 'global'
 let _dataSearchQuery = '';
 let _dataSortMode = 'favour_desc'; // 'favour_desc' | 'favour_asc' | 'uid_asc' | 'uid_desc' | 'unique_first' | 'username_asc'
 let _openFolderKeys = new Set(); // 记录当前展开的折叠卡片 key
+let _pendingMigrateSource = ''; // 从数据中心跳转迁移同步时自动填入的源会话 UMO
+
+function jumpToLegacyMigrate(sourceSid = 'global') {
+  _pendingMigrateSource = sourceSid || 'global';
+  const tabs = document.querySelectorAll('#tabs .nav-tab');
+  tabs.forEach((t) => {
+    t.classList.toggle('on', t.dataset.t === 'migrate');
+  });
+  renderTab('migrate');
+}
 
 function renderDataTab() {
   const sortOptions = [
@@ -1112,6 +1161,36 @@ function renderDataTab() {
 
   return `
     <div>
+      <!-- 旧版共享池（不带适配器）迁移黄色提醒框 -->
+      <div class="legacy-global-alert" id="legacy-global-alert">
+        <div class="legacy-alert-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+        </div>
+        <div class="legacy-alert-body">
+          <div class="legacy-alert-title-row">
+            <span class="legacy-alert-title">旧版共享池（不带适配器）迁移提醒</span>
+            <span class="legacy-alert-badge hidden" id="legacy-global-count-badge">检测到 0 条旧版记录</span>
+          </div>
+          <div class="legacy-alert-desc">
+            对于旧版共享池的数据，因部分数据存储位置或多适配器共存等原因无法自动判断所属平台，仍只能以原有方式保存（不带适配器前缀，显示为 <code>global</code>）。
+          </div>
+          <div class="legacy-alert-guide">
+            <div><strong>快速迁移指引：</strong></div>
+            <div>1. 点击右侧<strong>「前往快速迁移」</strong>按钮（或点击顶部导航进入「迁移同步」页）；</div>
+            <div>2. <strong>源会话 UMO</strong> 填写 <code>global</code>（点击右侧按钮将自动为您填好）；</div>
+            <div>3. <strong>目标会话 UMO</strong> 填写您的平台适配器名称（如 <code>aiocqhttp</code>，也可在下方的「活动会话快速拾取」列表中点击对应适配器的「设为目标」），随后点击<strong>「一键迁移 (清空源)」</strong>即可完成迁移。</div>
+          </div>
+        </div>
+        <div class="legacy-alert-actions">
+          <button type="button" class="btn-amber-action" id="btn-go-legacy-migrate">
+            <span>前往快速迁移</span>
+            <svg style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/></svg>
+          </button>
+        </div>
+      </div>
+
       <!-- 统计指标卡片 -->
       <div class="stats-banner" id="data-stats-banner">
         <div class="stat-box">
@@ -1249,6 +1328,11 @@ async function initDataTabLogic() {
     refreshBtn.onclick = () => loadDataRecords(true);
   }
 
+  const goMigrateBtn = document.getElementById('btn-go-legacy-migrate');
+  if (goMigrateBtn) {
+    goMigrateBtn.onclick = () => jumpToLegacyMigrate('global');
+  }
+
   await loadDataRecords();
 }
 
@@ -1302,6 +1386,20 @@ function updateDataStats() {
     })
   );
   if (sessEl) sessEl.textContent = sessions.size;
+
+  const legacyRows = gl.filter((r) => {
+    const sid = String(r.session_id || 'global').trim();
+    return sid === 'global' || !sid.includes(':');
+  });
+  const badgeEl = document.getElementById('legacy-global-count-badge');
+  if (badgeEl) {
+    if (legacyRows.length > 0) {
+      badgeEl.textContent = `当前检测到 ${legacyRows.length} 条旧版记录`;
+      badgeEl.classList.remove('hidden');
+    } else {
+      badgeEl.classList.add('hidden');
+    }
+  }
 }
 
 // 记录排序算法
@@ -1806,6 +1904,19 @@ async function initMigrateTabLogic() {
   if (moveBtn) moveBtn.onclick = () => executeSessionOp('migrate');
   if (refreshSessBtn) refreshSessBtn.onclick = () => loadMigrateSessions();
 
+  if (_pendingMigrateSource) {
+    const srcInp = document.getElementById('mig-src-umo');
+    if (srcInp) {
+      srcInp.value = _pendingMigrateSource;
+    }
+    const tgtInp = document.getElementById('mig-tgt-umo');
+    if (tgtInp) {
+      tgtInp.focus();
+    }
+    toast(`已为您自动填入源会话 "${_pendingMigrateSource}"，请填写或点选目标适配器后执行迁移`, 'ok', 4000);
+    _pendingMigrateSource = '';
+  }
+
   if (addSyncBtn) {
     addSyncBtn.onclick = async () => {
       const a = (document.getElementById('sync-pair-a')?.value || '').trim();
@@ -1860,9 +1971,14 @@ async function loadMigrateSessions() {
     `;
 
     _sessionsList.forEach((s) => {
+      const typeTag = s.session_id === 'global'
+        ? '<span class="tag-unique-pill" style="margin-left:6px">旧版共享池 (不带适配器)</span>'
+        : s.is_shared
+        ? '<span class="tag-platform" style="margin-left:6px">平台全局池 (适配器)</span>'
+        : '';
       html += `
         <tr>
-          <td style="font-family:ui-monospace,monospace;font-size:0.8rem">${escapeHtml(s.session_id)}</td>
+          <td style="font-family:ui-monospace,monospace;font-size:0.8rem">${escapeHtml(s.session_id)}${typeTag}</td>
           <td><span class="favour-badge neutral">${s.count} 条</span></td>
           <td style="text-align:right;white-space:nowrap">
             <button class="btn-outline" style="padding:3px 8px;font-size:0.75rem" data-act="pick-src-umo" data-sid="${escapeHtml(s.session_id)}">设为源</button>
@@ -2097,8 +2213,14 @@ async function loadBackupsList() {
       if (!config.backup || typeof config.backup !== 'object') {
         config.backup = {};
       }
+      if (!originalConfig.backup || typeof originalConfig.backup !== 'object') {
+        originalConfig.backup = {};
+      }
       if (config.backup.enabled === undefined) {
         config.backup.enabled = Boolean(data.config.enabled);
+        if (originalConfig.backup.enabled === undefined) {
+          originalConfig.backup.enabled = config.backup.enabled;
+        }
         const sw = document.getElementById('sw-backup-enabled');
         if (sw) {
           sw.checked = config.backup.enabled;
@@ -2108,11 +2230,17 @@ async function loadBackupsList() {
       }
       if (config.backup.interval_hours == null && data.config.interval_hours != null) {
         config.backup.interval_hours = data.config.interval_hours;
+        if (originalConfig.backup.interval_hours == null) {
+          originalConfig.backup.interval_hours = data.config.interval_hours;
+        }
         const inp = document.querySelector('input[data-p="backup.interval_hours"]');
         if (inp) inp.value = data.config.interval_hours;
       }
       if (config.backup.retention_hours == null && data.config.retention_hours != null) {
         config.backup.retention_hours = data.config.retention_hours;
+        if (originalConfig.backup.retention_hours == null) {
+          originalConfig.backup.retention_hours = data.config.retention_hours;
+        }
         const inp = document.querySelector('input[data-p="backup.retention_hours"]');
         if (inp) inp.value = data.config.retention_hours;
       }
@@ -2239,7 +2367,6 @@ function bindCustomSelects() {
         }
 
         container.classList.remove('open');
-        markDirty(true);
 
         const path = container.dataset.p;
         if (path) {
@@ -2259,6 +2386,8 @@ function bindCustomSelects() {
             collectFormData();
             renderTab('basic');
           }
+
+          syncDirtyState();
         }
 
         // 数据中心排序联动
@@ -2272,7 +2401,11 @@ function bindCustomSelects() {
 }
 
 function bindTabEvents(tabKey) {
-  // 监听输入改动
+  if (tabKey === 'data' || tabKey === 'migrate') {
+    return;
+  }
+
+  // 监听输入改动（回退为原值时自动消除“未保存改动”）
   document.querySelectorAll('#body input, #body textarea').forEach((el) => {
     el.oninput = el.onchange = () => {
       if (el.type === 'checkbox') {
@@ -2281,9 +2414,8 @@ function bindTabEvents(tabKey) {
           card.classList.toggle('active', el.checked);
         }
       }
-      markDirty(true);
+      syncDirtyState();
       if (tabKey === 'levels') {
-        collectFormData();
         updateLevelSpectrum();
       }
     };
@@ -2291,7 +2423,7 @@ function bindTabEvents(tabKey) {
 
   // 胶囊编辑器输入监听
   document.querySelectorAll('#body .chip-editor').forEach((el) => {
-    el.oninput = () => markDirty(true);
+    el.oninput = () => syncDirtyState();
   });
 
   // 占位符药丸插入事件
@@ -2306,7 +2438,7 @@ function bindTabEvents(tabKey) {
         textarea.value = text.substring(0, start) + code + text.substring(end);
         textarea.focus();
         textarea.selectionStart = textarea.selectionEnd = start + code.length;
-        markDirty(true);
+        syncDirtyState();
       }
     };
   });
@@ -2345,7 +2477,7 @@ function bindTabEvents(tabKey) {
       newRange.collapse(true);
       if (sel) { sel.removeAllRanges(); sel.addRange(newRange); }
 
-      markDirty(true);
+      syncDirtyState();
     };
   });
 
@@ -2364,54 +2496,54 @@ function bindTabEvents(tabKey) {
           name: '等级 ' + (levels.length + 1),
           desc: ''
         });
-        markDirty(true);
         renderTab('levels');
+        syncDirtyState();
       } else if (act === 'del-level-row') {
         const idx = +btn.dataset.idx;
         const levels = getVal('favour_levels', []);
         levels.splice(idx, 1);
-        markDirty(true);
         renderTab('levels');
+        syncDirtyState();
       } else if (act === 'add-adv-row') {
         const rules = getVal('favour_decay.advanced_rules', []);
         rules.push({ min_favour: 0, max_favour: 100, inactive_days: 7, decay_amount: 5, floor: null });
-        markDirty(true);
         renderTab('decay');
+        syncDirtyState();
       } else if (act === 'del-adv-row') {
         const idx = +btn.dataset.idx;
         const rules = getVal('favour_decay.advanced_rules', []);
         rules.splice(idx, 1);
-        markDirty(true);
         renderTab('decay');
+        syncDirtyState();
       } else if (act === 'add-act-row') {
         const rules = getVal('active_chat.rules', []);
         rules.push({ min_favour: 0, max_favour: 100, probability: 5 });
-        markDirty(true);
         renderTab('active');
+        syncDirtyState();
       } else if (act === 'del-act-row') {
         const idx = +btn.dataset.idx;
         const rules = getVal('active_chat.rules', []);
         rules.splice(idx, 1);
-        markDirty(true);
         renderTab('active');
+        syncDirtyState();
       } else if (act === 'add-list-item') {
         const path = btn.dataset.path;
         const list = getVal(path, []);
         list.push('');
-        markDirty(true);
         renderTab(currentTabName());
+        syncDirtyState();
       } else if (act === 'del-list-item') {
         const path = btn.dataset.path;
         const idx = +btn.dataset.idx;
         const list = getVal(path, []);
         list.splice(idx, 1);
         setVal(path, list);
-        markDirty(true);
         // 直接渲染避免被后续空收集忽略
         const bodyEl = document.getElementById('body');
         if (bodyEl) {
           renderTab(currentTabName());
         }
+        syncDirtyState();
       }
     };
   });
