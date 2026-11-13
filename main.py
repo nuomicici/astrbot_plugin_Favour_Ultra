@@ -748,12 +748,27 @@ class FavourManagerTool(Star):
                                     synth_msg.group_id = last_group_id
                                 
                                 # 构造合成事件
-                                synth_event = AstrMessageEvent(
-                                    message_str=prompt,
-                                    message_obj=synth_msg,
-                                    platform_meta=_platform_meta,
-                                    session_id=raw_target_session_id,
-                                )
+                                # 必须使用平台适配器的 create_event() 而非直接实例化 AstrMessageEvent 基类。
+                                # 基类的 send() 仅记录 trace/metric，不会真正发送消息到协议端；
+                                # AiocqhttpMessageEvent.send() 才持有 bot 引用并调用 send_private_msg/send_group_msg。
+                                meta_name = getattr(_platform_meta, "name", "") if _platform_meta else ""
+                                platform_inst = None
+                                for _p in self.context.platform_manager.platform_insts:
+                                    _pmeta = _p.meta()
+                                    if _pmeta.name == meta_name or _pmeta.id == platform:
+                                        platform_inst = _p
+                                        break
+                                if platform_inst is not None:
+                                    synth_event = platform_inst.create_event(synth_msg)
+                                else:
+                                    # 兜底：找不到平台实例时退化为基类（此路径消息仍可能无法送达，记录警告）
+                                    logger.warning(f"[搭话调度器] 未找到平台 {platform!r}({meta_name!r}) 的适配器实例，合成事件退化为基类，消息可能无法送达协议端")
+                                    synth_event = AstrMessageEvent(
+                                        message_str=prompt,
+                                        message_obj=synth_msg,
+                                        platform_meta=_platform_meta,
+                                        session_id=raw_target_session_id,
+                                    )
                                 # 确保 unified_msg_origin 为完整三段式 UMO（如 aiocqhttp:FriendMessage:123456）
                                 synth_event.unified_msg_origin = session_id
                                 #################
@@ -772,7 +787,6 @@ class FavourManagerTool(Star):
                                 # aiocqhttp 平台走事件队列（完整管线：persona + 分段）;
                                 # 其他支持主动消息的平台直接调 LLM + 发送（send_message 平台无关路由）
                                 #################
-                                meta_name = getattr(_platform_meta, "name", "") if _platform_meta else ""
                                 if platform.startswith("aiocqhttp") or str(meta_name).startswith("aiocqhttp"):
                                     self.context.get_event_queue().put_nowait(synth_event)
                                     logger.warning(f"[搭话结果] 触发 → 用户 {user_id} | 会话 {session_id} | 触发概率 {matched_prob}% | 好感度 {record.favour} | 平台 {platform} | 路径=合成事件管线")
