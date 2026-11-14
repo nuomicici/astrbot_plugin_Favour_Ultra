@@ -1177,7 +1177,7 @@ class FavourManagerTool(Star):
                     return m.group(1).strip()
         except Exception as e:
             logger.debug(f"读取插件版本号失败: {e}")
-        return "v4.4.13"
+        return "v4.4.16"
 
     async def _api_get_config(self):
         """GET /config → 返回当前完整配置与实际插件版本"""
@@ -1805,34 +1805,43 @@ class FavourManagerTool(Star):
     def _get_target_uid(self, event: AstrMessageEvent, text_arg: str, raw_extra_args: str = "") -> Optional[str]:
         """获取目标用户ID，支持At和纯文本。
         
-        修复 @用户名含空格时被框架解析为多个参数的问题：
-        当 text_arg 不是有效 ID 时，尝试合并 raw_extra_args 来重建完整文本。
+        排除系统与适配器保留标识（如 qq_official、unknown_selfid 等），
+        并在私聊场景下避免将框架注入的伪At组件误判为查询目标。
         """
-        # 1. 检查 At 组件（最优先，QQ号直接从At中提取，不受昵称空格影响）
-        bot_self_id = None
+        # 构建需排除的系统保留ID集合
+        excluded_ids: Set[str] = {"qq_official", "unknown_selfid", "all", "全体成员", "0", ""}
         if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'self_id'):
-            bot_self_id = str(event.message_obj.self_id)
+            raw_sid = str(event.message_obj.self_id or "").strip()
+            if raw_sid:
+                excluded_ids.add(raw_sid)
+        if hasattr(event, 'platform_meta'):
+            p_name = getattr(event.platform_meta, "name", "")
+            p_id = getattr(event.platform_meta, "id", "")
+            if p_name: excluded_ids.add(str(p_name).strip())
+            if p_id: excluded_ids.add(str(p_id).strip())
 
-        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'message'):
+        is_group = bool(event.get_group_id())
+
+        # 1. 检查 At 组件（群聊场景下优先，QQ号直接从At中提取；私聊下跳过伪At组件）
+        if is_group and hasattr(event, 'message_obj') and hasattr(event.message_obj, 'message'):
             for component in event.message_obj.message:
                 if isinstance(component, At):
-                    uid = str(component.qq)
-                    if bot_self_id and uid == bot_self_id:
-                        continue
-                    return uid
+                    uid = str(getattr(component, "qq", "") or "").strip()
+                    if uid and uid not in excluded_ids and is_valid_userid(uid):
+                        return uid
         
-        # 2. 检查文本参数（支持空格昵称）
+        # 2. 检查文本参数（支持空格昵称或显式传入的ID）
         if text_arg:
             # 合并被框架拆分的参数
             full_text = (text_arg + " " + raw_extra_args).strip() if raw_extra_args else text_arg.strip()
             
             # 先尝试作为纯 ID
-            if is_valid_userid(full_text):
+            if is_valid_userid(full_text) and full_text not in excluded_ids:
                 return full_text
             
             # 如果 text_arg 本身是有效 ID（不含空格场景）
             cleaned_arg = text_arg.strip()
-            if is_valid_userid(cleaned_arg):
+            if is_valid_userid(cleaned_arg) and cleaned_arg not in excluded_ids:
                 return cleaned_arg
             
         return None
@@ -1916,10 +1925,17 @@ class FavourManagerTool(Star):
           - 同一消息中重复 @ 的同一用户（保持首次出现顺序）
         """
         bot_self_id = None
+        excluded_ids: Set[str] = {"qq_official", "unknown_selfid", "all", "全体成员", "0", ""}
         if hasattr(event, "message_obj") and hasattr(event.message_obj, "self_id"):
             raw_self_id = getattr(event.message_obj, "self_id", None)
             if raw_self_id is not None:
                 bot_self_id = str(raw_self_id)
+                excluded_ids.add(bot_self_id)
+        if hasattr(event, 'platform_meta'):
+            p_name = getattr(event.platform_meta, "name", "")
+            p_id = getattr(event.platform_meta, "id", "")
+            if p_name: excluded_ids.add(str(p_name).strip())
+            if p_id: excluded_ids.add(str(p_id).strip())
 
         mentioned: List[Tuple[str, str]] = []
         seen: set = set()
@@ -1927,7 +1943,7 @@ class FavourManagerTool(Star):
             for component in (event.message_obj.message or []):
                 if isinstance(component, At):
                     uid = str(getattr(component, "qq", "") or "").strip()
-                    if not uid or uid.lower() == "all" or uid == "0":
+                    if not uid or uid.lower() in excluded_ids:
                         continue
                     if bot_self_id and uid == bot_self_id:
                         continue
@@ -2069,16 +2085,26 @@ class FavourManagerTool(Star):
         return text
 
     async def _get_user_display_name(self, event: AstrMessageEvent, user_id: str) -> str:
+        # 1. 如果是当前发话者且框架自带昵称
+        if str(user_id) == str(event.get_sender_id()):
+            sender_name = event.get_sender_name()
+            if sender_name and sender_name != user_id and sender_name != "unknown_selfid":
+                return sender_name
+
+        # 2. 针对 OneBot (aiocqhttp) 平台的 API 查询
         try:
-            group_id = event.get_group_id()
-            if group_id:
-                info = await event.bot.get_group_member_info(group_id=int(group_id), user_id=int(user_id), no_cache=True)
-                return info.get("card") or info.get("nickname") or user_id
-            else:
-                info = await event.bot.get_stranger_info(user_id=int(user_id))
-                return info.get("nickname") or user_id
-        except:
-            return user_id
+            if hasattr(event, "bot") and hasattr(event.bot, "get_group_member_info"):
+                group_id = event.get_group_id()
+                if group_id and str(group_id).isdigit() and str(user_id).isdigit():
+                    info = await event.bot.get_group_member_info(group_id=int(group_id), user_id=int(user_id), no_cache=True)
+                    return info.get("card") or info.get("nickname") or user_id
+                elif str(user_id).isdigit() and hasattr(event.bot, "get_stranger_info"):
+                    info = await event.bot.get_stranger_info(user_id=int(user_id))
+                    return info.get("nickname") or user_id
+        except Exception:
+            pass
+
+        return user_id
 
     async def _check_permission(self, event: AstrMessageEvent, required_level: int) -> bool:
         # 沿用框架按当前会话配置判定的身份，避免默认配置名单与实际配置不一致。
