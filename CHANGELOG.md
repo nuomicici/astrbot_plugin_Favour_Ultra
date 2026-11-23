@@ -15,6 +15,15 @@
 
 ## 更新日志
 
+### v4.4.17 (2026-11-24)
+- **兼容 AstrBot v4.30.0+ 消息模块变更**：
+  - 适配 AstrBot `v4.30.0-beta.1` 移除 `astrbot.core.agent.message` 中 `bind_checkpoint_messages` 与 `is_checkpoint_message` 的变更，改为兼容导入并在新版中自动回退至 `load_messages`（及 `Message.model_validate` 兜底），同时保留对旧版 AstrBot 的向后兼容，解决新版框架下安装/加载插件报 `ImportError` 的问题。
+
+### v4.4.16 (2026-11-15)
+- **修复 QQ 官方机器人私信好感度返回适配器名称的问题**：
+  - 排查并修复官方机器人（`qq_official` 等）私信收到消息时，框架自动在消息链中注入虚拟 `At(qq="qq_official")` 导致查询命令误将适配器名判定为查询目标用户 ID 的问题；
+  - 完善指令目标解析与上下文 `@提及` 提取逻辑，增加系统保留标识与适配器名称过滤黑名单（`qq_official`、`unknown_selfid` 等），并在私聊环境下隔离伪 At 组件，确保精准识别并返回发送者自身的真实 ID。
+
 ### v4.4.14 (2026-11-13)
 - **修复主动搭话失败问题**：修复了主动搭话Astrbot日志显示成功但实际未发送的问题
 ### v4.4.13 (2026-11-04)

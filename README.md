@@ -3,14 +3,16 @@
 
 # 可自定义好感度系统 (Favour Ultra)
 
-[![当前版本](https://img.shields.io/badge/当前版本v4.4.14-blue?style=for-the-badge)](CHANGELOG.md)
+[![当前版本](https://img.shields.io/badge/当前版本v4.4.17-blue?style=for-the-badge)](CHANGELOG.md)
 [![未来计划](https://img.shields.io/badge/未来计划-purple?style=for-the-badge)](#未来计划)
 [![来许愿！](https://img.shields.io/badge/来许愿！-ff69b4?style=for-the-badge)](#联系)
 
 <div align="left" style="width:70%">
 
-最新动态 (2026-11-04)
+最新动态 (2026-11-24)
 
+* **兼容 AstrBot v4.30.0+ 消息模块变更 (v4.4.17)**：适配 AstrBot `v4.30.0-beta.1` 移除 `bind_checkpoint_messages` / `is_checkpoint_message` 的变更，兼容新旧版本框架加载与历史上下文解析
+* **修复 QQ 官方机器人私信查询好感度返回适配器名问题 (v4.4.16)**：修复官方机器人私信时框架自动注入伪 At 导致查询命令误将适配器名 `qq_official` 判定为查询目标的问题，完善系统保留字与适配器过滤黑名单
 * **修复搭话失败问题 (v4.4.14)**：修复因构造事件管线操作不规范导致消息无法发送至协议端的问题
 * **旧版共享池迁移优化与面板改进 (v4.4.13)**：自动找回升级后未带上平台名称的旧版全局好感度数据；「数据中心」新增黄色提醒框与一键跳转迁移指引；修改配置后若改回原样，自动取消「未保存改动」提示
 * **动态注入与提及感知 (v4.4.12)**：新增胶囊化动态提示词注入模板与默认关系名称；支持自动识别消息中被 `@` 提及用户的好感度与关系注入上下文（#34）；全局好感度改为 `platform:UID` 并修复全局主动搭话 UMO 拼接问题（#32）；修复 WebUI 开关关闭动画与配置同步问题（#33）
