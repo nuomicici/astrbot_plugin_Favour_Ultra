@@ -1,0 +1,12 @@
+{
+  "views": {
+    "settings": {
+      "title": "好感度面板"
+    }
+  },
+  "pages": {
+    "settings": {
+      "title": "好感度面板"
+    }
+  }
+}
